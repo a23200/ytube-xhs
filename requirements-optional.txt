@@ -1,0 +1,13 @@
+# Optional heavy runtime providers.
+# Install these when you need no-subtitle transcription and OCR.
+faster-whisper>=1.1,<2.0
+paddleocr>=2.7,<3.0
+# PaddleOCR also needs a PaddlePaddle runtime. Pick the wheel that matches your OS/CPU/GPU.
+# CPU examples:
+#   macOS/Linux: python3 -m pip install paddlepaddle
+#   CUDA builds: see https://www.paddlepaddle.org.cn/install/quick
+
+# Lightweight OCR fallback when the system `tesseract` command is installed.
+# The application calls the command directly, so this Python package is not required.
+# macOS example:
+#   brew install tesseract

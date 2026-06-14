@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+runtime/projects/
+runtime/*.zip
+.DS_Store
+
+# Runtime/generated artifacts
+runtime/logs/
+runtime/*.log
+runtime/*.pid
+runtime/_self_tests/
+# Tool caches
+.ruff_cache/

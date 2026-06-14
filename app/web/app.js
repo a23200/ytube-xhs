@@ -1,0 +1,2451 @@
+const app = document.querySelector("#app");
+const modalRoot = document.querySelector("#modal-root");
+
+const STATUS_META = {
+  created: { label: "任务已创建", hint: "准备进入解析队列" },
+  ingesting: { label: "获取视频信息", hint: "yt-dlp 获取元数据、字幕和媒体" },
+  transcribing: { label: "生成字幕时间轴", hint: "优先原字幕，无字幕时走 Whisper" },
+  extracting_frames: { label: "抽取关键帧", hint: "场景检测并筛选清晰画面" },
+  analyzing_visuals: { label: "识别画面文字", hint: "OCR 和基础视觉分析" },
+  planning_content: { label: "生成创作底稿", hint: "提炼事实、观点、受众和选题方向" },
+  analysis_completed: { label: "解析完成", hint: "可确认/编辑后产出图文" },
+  producing_article: { label: "生成小红书稿", hint: "生成标题、正文、标签和配图计划" },
+  xhs_completed: { label: "小红书稿完成", hint: "文章和图片提示词已生成，等待独立生图 API 渲染 PNG" },
+  toutiao_completed: { label: "今日头条稿完成", hint: "文章和图片提示词已生成，等待独立生图 API 渲染 PNG" },
+  writing_xhs: { label: "写入文章文件", hint: "写入 JSON、Markdown 和提示词" },
+  rendering_cards: { label: "渲染图文卡片", hint: "生成小红书竖版 PNG 卡片" },
+  completed: { label: "图文完成", hint: "文章、卡片和下载素材已准备好" },
+  failed: { label: "处理失败", hint: "查看错误原因和已生成产物" },
+};
+
+const STATUS_STEPS = [
+  ["created", STATUS_META.created.label, STATUS_META.created.hint],
+  ["ingesting", STATUS_META.ingesting.label, STATUS_META.ingesting.hint],
+  ["transcribing", STATUS_META.transcribing.label, STATUS_META.transcribing.hint],
+  ["extracting_frames", STATUS_META.extracting_frames.label, STATUS_META.extracting_frames.hint],
+  ["analyzing_visuals", STATUS_META.analyzing_visuals.label, STATUS_META.analyzing_visuals.hint],
+  ["planning_content", STATUS_META.planning_content.label, STATUS_META.planning_content.hint],
+  ["analysis_completed", STATUS_META.analysis_completed.label, STATUS_META.analysis_completed.hint],
+  ["producing_article", STATUS_META.producing_article.label, STATUS_META.producing_article.hint],
+  ["xhs_completed", STATUS_META.xhs_completed.label, STATUS_META.xhs_completed.hint],
+  ["toutiao_completed", STATUS_META.toutiao_completed.label, STATUS_META.toutiao_completed.hint],
+  ["writing_xhs", STATUS_META.writing_xhs.label, STATUS_META.writing_xhs.hint],
+  ["rendering_cards", STATUS_META.rendering_cards.label, STATUS_META.rendering_cards.hint],
+  ["completed", STATUS_META.completed.label, STATUS_META.completed.hint],
+];
+
+const STAGE_OUTPUTS = {
+  ingesting: ["metadata"],
+  transcribing: ["transcript"],
+  extracting_frames: ["keyframes"],
+  analyzing_visuals: ["visual_analysis"],
+  planning_content: ["content_assets"],
+  analysis_completed: ["content_assets", "asset_package"],
+  producing_article: ["xhs_post_json", "image_prompts"],
+  xhs_completed: ["xhs_post_json", "xhs_post_md", "image_prompts", "asset_package"],
+  toutiao_completed: ["toutiao_post_json", "toutiao_post_md", "toutiao_image_prompts", "asset_package"],
+  writing_xhs: ["xhs_post_json", "xhs_post_md", "image_prompts", "asset_package"],
+  rendering_cards: ["image_cards"],
+  completed: [
+    "metadata",
+    "transcript",
+    "keyframes",
+    "visual_analysis",
+    "content_assets",
+    "xhs_post_json",
+    "xhs_post_md",
+    "image_prompts",
+    "image_cards",
+    "toutiao_post_json",
+    "toutiao_post_md",
+    "toutiao_image_prompts",
+    "toutiao_image_cards",
+    "asset_package",
+    "run_metadata",
+  ],
+};
+
+const FILE_KINDS = [
+  ["metadata", "视频信息", "source/metadata.json"],
+  ["transcript", "字幕时间轴", "transcript/transcript.json"],
+  ["keyframes", "关键帧清单", "analysis/keyframes.json"],
+  ["visual_analysis", "视觉/OCR 分析", "analysis/visual-analysis.json"],
+  ["content_assets", "创作底稿", "analysis/content-assets.json"],
+  ["xhs_post_json", "小红书稿 JSON", "analysis/xiaohongshu-post.json"],
+  ["xhs_post_md", "小红书稿 Markdown", "analysis/xhs-post.md"],
+  ["image_prompts", "图片提示词", "analysis/image-prompts.json"],
+  ["image_cards", "图文卡片清单", "analysis/image-cards.json"],
+  ["toutiao_post_json", "今日头条稿 JSON", "analysis/toutiao-post.json"],
+  ["toutiao_post_md", "今日头条稿 Markdown", "analysis/toutiao-post.md"],
+  ["toutiao_image_prompts", "今日头条图片提示词", "analysis/toutiao-image-prompts.json"],
+  ["toutiao_image_cards", "今日头条卡片清单", "analysis/toutiao-image-cards.json"],
+  ["asset_package", "完整素材包", "analysis/asset-package.json"],
+  ["run_metadata", "运行元数据", "analysis/run-metadata.json"],
+];
+
+const READY_FOR_LABELS = {
+  ingest: "视频获取",
+  subtitle_transcript: "原字幕解析",
+  whisper_transcript: "Whisper 转录",
+  frame_extraction: "关键帧抽取",
+  ocr: "OCR 识别",
+  llm_generation: "LLM 图文生成",
+  image_generation: "生图卡片生成",
+};
+
+const DETAIL_TABS = [
+  ["overview", "概览"],
+  ["transcript", "字幕"],
+  ["keyframes", "关键帧"],
+  ["visual", "OCR / 视觉"],
+  ["assets", "创作底稿"],
+  ["xhs", "小红书稿"],
+  ["toutiao", "今日头条稿"],
+  ["files", "文件下载"],
+];
+
+const CONTENT_ROUTES = {
+  xhs: {
+    key: "xhs",
+    label: "小红书",
+    shortLabel: "XHS",
+    postJson: "xhs_post_json",
+    postMd: "xhs_post_md",
+    prompts: "image_prompts",
+    cards: "image_cards",
+    completedStatus: "xhs_completed",
+    producePath: "produce",
+    imagePath: "generate-images",
+    postPatchPath: "xhs-post",
+    cardsPatchPath: "image-cards",
+    cardFilePath: "cards",
+    cardsDownloadPath: "download/cards",
+    bodyCopyId: "xhs-body",
+    title: "小红书文章 + 图文卡片",
+    emptyText: "配置 LLM 后点击左侧“一键产出图文”。",
+    postPreviewTitle: "小红书稿预览",
+    saveMessage: "小红书文章已保存，Markdown 与 asset-package 已同步更新。",
+    articleReadyToast: "小红书稿已完成，已调用独立生图 API。",
+    produceToast: "已开始生成小红书稿；完成后会自动调用独立生图 API。",
+    llmMissingToast: "LLM 未配置，不能生成小红书文章。请先到 LLM API 设置页配置。",
+    emptyPostTitle: "小红书稿尚不可用",
+  },
+  toutiao: {
+    key: "toutiao",
+    label: "今日头条",
+    shortLabel: "头条",
+    postJson: "toutiao_post_json",
+    postMd: "toutiao_post_md",
+    prompts: "toutiao_image_prompts",
+    cards: "toutiao_image_cards",
+    completedStatus: "toutiao_completed",
+    producePath: "produce/toutiao",
+    imagePath: "generate-images/toutiao",
+    postPatchPath: "toutiao-post",
+    cardsPatchPath: "toutiao-image-cards",
+    cardFilePath: "toutiao-cards",
+    cardsDownloadPath: "download/toutiao-cards",
+    bodyCopyId: "toutiao-body",
+    title: "今日头条文章 + 图文卡片",
+    emptyText: "配置 LLM 后点击左侧“一键产出图文”。",
+    postPreviewTitle: "今日头条稿预览",
+    saveMessage: "今日头条文章已保存，Markdown 与 asset-package 已同步更新。",
+    articleReadyToast: "今日头条稿已完成，已调用独立生图 API。",
+    produceToast: "已开始生成今日头条稿；完成后会自动调用独立生图 API。",
+    llmMissingToast: "LLM 未配置，不能生成今日头条文章。请先到 LLM API 设置页配置。",
+    emptyPostTitle: "今日头条稿尚不可用",
+  },
+};
+
+const state = {
+  health: null,
+  projects: [],
+  summaries: new Map(),
+  activeProjectId: window.localStorage.getItem("xhs.activeProjectId") || "",
+  activeStatus: null,
+  detail: null,
+  workbenchDetail: null,
+  llmSettings: null,
+  imageSettings: null,
+  detailTab: "overview",
+  activeContentRoute: window.localStorage.getItem("xhs.activeContentRoute") || "xhs",
+  transcriptQuery: "",
+  pollTimer: null,
+  pendingImageGenerationProjectId: "",
+  pendingImageGenerationRoute: "",
+  modalFrames: [],
+};
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function prettyJson(value) {
+  return escapeHtml(JSON.stringify(value ?? {}, null, 2));
+}
+
+function pathFor(route) {
+  return route + (route.startsWith("/") ? "" : "");
+}
+
+function statusClass(status) {
+  if (status === "completed") return "status-ok";
+  if (status === "failed") return "status-error";
+  if (!status) return "";
+  return `status-${String(status).replace(/[^a-z0-9_-]/gi, "")}`;
+}
+
+function statusLabel(status) {
+  return STATUS_META[status]?.label || String(status || "未知状态");
+}
+
+function statusHint(status) {
+  return STATUS_META[status]?.hint || "等待后端更新状态";
+}
+
+function statusPill(status, extraClass = "") {
+  return `<span class="status-pill ${statusClass(status)} ${extraClass}">${escapeHtml(statusLabel(status))}</span>`;
+}
+
+function currentContentRoute() {
+  return CONTENT_ROUTES[state.activeContentRoute] || CONTENT_ROUTES.xhs;
+}
+
+function setContentRoute(routeKey) {
+  state.activeContentRoute = CONTENT_ROUTES[routeKey] ? routeKey : "xhs";
+  window.localStorage.setItem("xhs.activeContentRoute", state.activeContentRoute);
+}
+
+function routePost(detail, route = currentContentRoute()) {
+  return detail?.files?.[route.postJson];
+}
+
+function routeCards(detail, route = currentContentRoute()) {
+  return detail?.files?.[route.cards];
+}
+
+function routePrompts(detail, route = currentContentRoute()) {
+  return detail?.files?.[route.prompts];
+}
+
+function routeStatus(status, route = currentContentRoute()) {
+  return status?.routes?.[route.key] || {};
+}
+
+function routeHasPost(detail, route = currentContentRoute()) {
+  return Boolean(routePost(detail, route));
+}
+
+function routeHasCards(detail, route = currentContentRoute()) {
+  return Boolean(routeCards(detail, route));
+}
+
+function routeOutputReady(outputs, route = currentContentRoute()) {
+  return Boolean(outputs?.[route.postJson] || outputs?.[route.postMd]);
+}
+
+function routeCardsReady(outputs, route = currentContentRoute()) {
+  return Boolean(outputs?.[route.cards]);
+}
+
+function isRunning(status) {
+  return Boolean(status && !["analysis_completed", "xhs_completed", "toutiao_completed", "completed", "failed"].includes(status));
+}
+
+function shouldContinuePolling(projectId, status) {
+  const route = CONTENT_ROUTES[state.pendingImageGenerationRoute] || currentContentRoute();
+  return isRunning(status) || (status === route.completedStatus && state.pendingImageGenerationProjectId === projectId);
+}
+
+function safeDate(value) {
+  if (!value) return "n/a";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleString();
+}
+
+function secondsLabel(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "n/a";
+  const total = Math.max(0, Number(seconds));
+  if (total < 60) return `${total.toFixed(total < 10 ? 1 : 0)} 秒`;
+  const minutes = Math.floor(total / 60);
+  const rest = Math.round(total % 60);
+  if (minutes < 60) return `${minutes} 分 ${rest} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 小时 ${minutes % 60} 分`;
+}
+
+function estimateLabel(seconds, confidence) {
+  if (confidence === "complete") return "已完成";
+  if (confidence === "failed" || seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "无法估算";
+  return `约 ${secondsLabel(seconds)}`;
+}
+
+function durationBetween(start, end) {
+  if (!start || !end) return null;
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return null;
+  return Math.max(0, (endDate.getTime() - startDate.getTime()) / 1000);
+}
+
+function frameFilename(path) {
+  return String(path || "").split(/[\\/]/).pop();
+}
+
+function textSnippet(text, length = 120) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (value.length <= length) return value;
+  return `${value.slice(0, length - 1)}...`;
+}
+
+function errorText(error) {
+  const detail = error?.body?.detail ?? error?.detail ?? error;
+  if (typeof detail === "string") return detail;
+  if (detail?.code === "youtube_media_download_forbidden") {
+    return "YouTube 媒体流返回 403。链接可以公开查看，但当前运行环境被 YouTube 拒绝下载视频分片；系统会优先尝试使用真实字幕继续分析，若没有字幕则需要导出最新 cookies.txt 或换网络/IP 后重试。";
+  }
+  if (detail?.code === "youtube_bot_check_required") {
+    return "YouTube 要求登录确认不是机器人。请配置浏览器 Cookie（例如 XHS_YTDLP_COOKIES_FROM_BROWSER=chrome）或导出的 cookies.txt 后重试。";
+  }
+  if (detail?.code === "youtube_network_tls_failed") {
+    return "当前运行环境到 YouTube 的网络/TLS 请求失败，视频可能仍是公开的。请稍后重试、换网络/IP，或配置浏览器导出的 cookies.txt 后再跑。";
+  }
+  if (detail?.code === "llm_contract_invalid") {
+    return "LLM 返回内容不符合真实产物格式，系统已停止生成，避免用模板或 demo 内容冒充分析。请重试或检查 LLM 配置。";
+  }
+  if (detail?.message) return `${detail.code ? `${detail.code}: ` : ""}${detail.message}`;
+  if (error?.message) return error.message;
+  return JSON.stringify(detail);
+}
+
+function logMessageZh(message) {
+  const map = {
+    "Project created.": "任务已创建。",
+    "Fetching video metadata, media, subtitles, and thumbnail.": "正在获取视频信息、媒体、字幕和缩略图。",
+    "Ingest completed.": "视频信息获取完成。",
+    "Building normalized transcript timeline.": "正在生成统一字幕时间轴。",
+    "Transcript completed.": "字幕时间轴生成完成。",
+    "Detecting scenes and extracting keyframes.": "正在检测场景并抽取关键帧。",
+    "Keyframes completed.": "关键帧抽取完成。",
+    "Running OCR and visual analysis providers.": "正在运行 OCR 和视觉分析。",
+    "Visual analysis completed.": "视觉/OCR 分析完成。",
+    "No video file is available; continuing with transcript-only analysis.": "没有可用视频文件，已改用真实字幕继续分析。",
+    "Generating structured content assets with LLM.": "正在用 LLM 生成真实创作底稿。",
+    "Analysis completed. Review or edit content assets before producing XHS cards.": "解析完成。请确认或编辑创作底稿后再产出图文。",
+    "Produce job queued.": "图文产出任务已排队。",
+    "Generating Xiaohongshu post from reviewed analysis assets.": "正在根据已确认解析生成小红书稿。",
+    "Generating Toutiao post from reviewed analysis assets.": "正在根据已确认解析生成今日头条稿。",
+    "XHS article completed. Image generation can be run next.": "小红书稿已完成，接下来会调用独立生图 API。",
+    "Toutiao article completed. Image generation can be run next.": "今日头条稿已完成，接下来会调用独立生图 API。",
+    "Image generation job queued.": "生图任务已排队。",
+    "Rendering finished Xiaohongshu image-card PNG files.": "正在渲染小红书图文卡片 PNG。",
+    "Rendering finished Toutiao image-card PNG files.": "正在渲染今日头条图文卡片 PNG。",
+    "Image generation completed. XHS article and image cards are ready.": "生图完成，文章和图片卡片已准备好。",
+    "Image generation completed. Toutiao article and image cards are ready.": "生图完成，今日头条文章和图片卡片已准备好。",
+    "Produce completed. XHS article and image cards are ready.": "图文产出完成，文章和图片卡片已准备好。",
+    "Pipeline completed.": "完整处理链路已完成。",
+    "Content assets updated from workbench.": "已从工作台保存创作底稿。",
+    "XHS post updated from workbench.": "已从工作台保存小红书稿。",
+    "Toutiao post updated from workbench.": "已从工作台保存今日头条稿。",
+    "Image cards updated and rerendered.": "图文卡片已保存并重新渲染。",
+    "Toutiao image cards updated and rerendered.": "今日头条图文卡片已保存并重新渲染。",
+    "Downstream rerun queued.": "文案重跑任务已排队。",
+    "Visual analysis rerun queued.": "视觉/OCR 重跑任务已排队。",
+  };
+  return map[message] || message || "";
+}
+
+function warningZh(message) {
+  const map = {
+    "No-subtitle videos require faster-whisper plus ffmpeg.": "无字幕视频需要 faster-whisper 和 ffmpeg。",
+    "No OCR provider is available; install PaddleOCR or tesseract to extract screen text.": "当前没有可用 OCR 提供方；安装 PaddleOCR 或 tesseract 后可提取画面文字。",
+    "LLM generation requires BUSINESS_LLM_API_KEY or XHS_LLM_API_KEY. For local OpenAI-compatible endpoints without auth, set XHS_LLM_REQUIRE_API_KEY=false.": "LLM 图文生成需要 BUSINESS_LLM_API_KEY 或 XHS_LLM_API_KEY；如果本地 OpenAI-compatible 服务不需要鉴权，请设置 XHS_LLM_REQUIRE_API_KEY=false。",
+    "LLM generation requires httpx and a reachable OpenAI-compatible chat completions endpoint.": "LLM 图文生成需要 httpx，并且需要可访问的 OpenAI-compatible chat completions 接口。",
+  };
+  return map[message] || message || "";
+}
+
+function readyForLabel(key) {
+  return READY_FOR_LABELS[key] || key;
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = options.body ? { "Content-Type": "application/json", ...(options.headers || {}) } : options.headers;
+  const response = await fetch(path, { ...options, headers });
+  const text = await response.text();
+  let body = text;
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json") && text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  if (!response.ok) {
+    const error = new Error(typeof body === "string" ? body : body?.detail?.message || body?.detail || response.statusText);
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
+  return body;
+}
+
+const apiGet = (path) => apiRequest(path);
+const apiPost = (path, body = {}) => apiRequest(path, { method: "POST", body: JSON.stringify(body) });
+const apiPut = (path, body = {}) => apiRequest(path, { method: "PUT", body: JSON.stringify(body) });
+const apiPatch = (path, body = {}) => apiRequest(path, { method: "PATCH", body: JSON.stringify(body) });
+const apiDelete = (path) => apiRequest(path, { method: "DELETE" });
+
+async function apiFile(projectId, kind) {
+  const response = await fetch(`/api/projects/${projectId}/files/${kind}`);
+  if (!response.ok) {
+    const error = new Error(response.statusText);
+    error.status = response.status;
+    throw error;
+  }
+  if (kind === "xhs_post_md" || kind === "toutiao_post_md") return response.text();
+  return response.json();
+}
+
+function routeInfo() {
+  const path = window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
+  const params = new URLSearchParams(window.location.search);
+  if (path === "/dashboard") return { name: "dashboard", title: "生产工作台", mark: "台", tab: params.get("tab") };
+  if (path === "/projects") return { name: "projects", title: "历史项目", mark: "项", tab: params.get("tab") };
+  const detailMatch = path.match(/^\/projects\/([^/]+)$/);
+  if (detailMatch) {
+    return {
+      name: "project-detail",
+      title: "项目详情",
+      mark: "详",
+      projectId: decodeURIComponent(detailMatch[1]),
+      tab: params.get("tab") || "overview",
+    };
+  }
+  if (path === "/settings/llm") return { name: "llm", title: "LLM 配置", mark: "LLM" };
+  if (path === "/settings/runtime") return { name: "runtime", title: "运行诊断", mark: "诊" };
+  return { name: "not-found", title: "页面不存在", mark: "404" };
+}
+
+function navigate(path) {
+  window.history.pushState({}, "", pathFor(path));
+  renderRoute();
+}
+
+function currentNavClass(name) {
+  const route = routeInfo();
+  if (name === "dashboard" && route.name === "dashboard") return "active";
+  if (name === "projects" && ["projects", "project-detail"].includes(route.name)) return "active";
+  if (name === "llm" && route.name === "llm") return "active";
+  if (name === "runtime" && route.name === "runtime") return "active";
+  return "";
+}
+
+function shell({ title, subtitle, mark, actions = "", body = "" }) {
+  document.title = `${title} · 视频图文生产工作台`;
+  app.innerHTML = `
+    <div class="app-layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">X</span>
+          <div>
+            <h1>视频图文生产</h1>
+            <p>Video-to-XHS Workbench</p>
+          </div>
+        </div>
+        <nav class="nav-group" aria-label="主导航">
+          <div class="nav-title">工作区</div>
+          <a class="nav-link ${currentNavClass("dashboard")}" href="/dashboard" data-route="/dashboard">
+            <span class="nav-mark">台</span><span>生产工作台</span>
+          </a>
+          <a class="nav-link ${currentNavClass("projects")}" href="/projects" data-route="/projects">
+            <span class="nav-mark">项</span><span>历史项目</span>
+          </a>
+          <div class="nav-title">设置</div>
+          <a class="nav-link ${currentNavClass("llm")}" href="/settings/llm" data-route="/settings/llm">
+            <span class="nav-mark">L</span><span>LLM 配置</span>
+          </a>
+          <a class="nav-link ${currentNavClass("runtime")}" href="/settings/runtime" data-route="/settings/runtime">
+            <span class="nav-mark">诊</span><span>运行诊断</span>
+          </a>
+        </nav>
+        <div class="sidebar-footer">
+          <b>合规边界</b><br />
+          仅处理用户有权处理的视频；所有稿件保留来源、标题、作者和时间点。
+        </div>
+      </aside>
+      <main class="main-shell">
+        <header class="topbar">
+          <div class="topbar-title">
+            <span class="route-mark">${escapeHtml(mark || "X")}</span>
+            <div>
+              <h2>${escapeHtml(title)}</h2>
+              <p>${escapeHtml(subtitle || "")}</p>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <span id="api-health-pill" class="status-pill ${state.health?.ok ? "status-ok" : ""}">
+              API ${state.health?.ok ? "在线" : "检查中"}
+            </span>
+            ${actions}
+          </div>
+        </header>
+        <section class="workspace">${body}</section>
+      </main>
+    </div>
+  `;
+}
+
+function loadingPanel(title = "加载中") {
+  return `
+    <section class="panel pad">
+      <div class="section-title">
+        <h3>${escapeHtml(title)}</h3>
+        <p>正在读取真实后端数据。</p>
+      </div>
+      <div class="stack">
+        <div class="loading-line"></div>
+        <div class="loading-line" style="width: 84%"></div>
+        <div class="loading-line" style="width: 62%"></div>
+      </div>
+    </section>
+  `;
+}
+
+function emptyState(message, detail = "") {
+  return `<div class="empty-state"><b>${escapeHtml(message)}</b>${detail ? `<br />${escapeHtml(detail)}` : ""}</div>`;
+}
+
+function warningState(message) {
+  return `<div class="warning-state">${escapeHtml(message)}</div>`;
+}
+
+function errorState(message) {
+  return `<div class="error-state">${escapeHtml(message)}</div>`;
+}
+
+async function refreshHealth() {
+  try {
+    state.health = await apiGet("/api/health");
+  } catch {
+    state.health = { ok: false };
+  }
+  const pill = document.querySelector("#api-health-pill");
+  if (pill) {
+    pill.textContent = `API ${state.health.ok ? "在线" : "离线"}`;
+    pill.className = `status-pill ${state.health.ok ? "status-ok" : "status-error"}`;
+  }
+}
+
+async function loadProjects() {
+  const projects = await apiGet("/api/projects");
+  state.projects = [...projects].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  await hydrateProjectSummaries(state.projects.slice(0, 30));
+  return state.projects;
+}
+
+async function hydrateProjectSummaries(projects) {
+  await Promise.allSettled(projects.map((project) => hydrateProjectSummary(project)));
+}
+
+async function hydrateProjectSummary(project) {
+  if (!project?.project_id) return null;
+  const cached = state.summaries.get(project.project_id) || {};
+  const summary = {
+    ...cached,
+    title: cached.title || project.project_id,
+    author: cached.author || "",
+    duration: cached.duration ?? null,
+    thumbnail: cached.thumbnail || "",
+    frameCount: cached.frameCount ?? 0,
+    xhsReady: Boolean(project.outputs?.xhs_post_json),
+    toutiaoReady: Boolean(project.outputs?.toutiao_post_json),
+    cardCount: cached.cardCount ?? 0,
+    toutiaoCardCount: cached.toutiaoCardCount ?? 0,
+  };
+  if (project.outputs?.metadata && !cached.metadataLoaded) {
+    try {
+      const metadata = await apiFile(project.project_id, "metadata");
+      summary.title = metadata.title || summary.title;
+      summary.author = metadata.author || summary.author;
+      summary.duration = metadata.duration ?? summary.duration;
+      summary.thumbnail = metadata.thumbnail || summary.thumbnail;
+      summary.metadataLoaded = true;
+    } catch {
+      summary.metadataLoaded = false;
+    }
+  }
+  if (project.outputs?.keyframes && !cached.keyframesLoaded) {
+    try {
+      const keyframes = await apiFile(project.project_id, "keyframes");
+      summary.frameCount = keyframes.frame_count ?? keyframes.keyframes?.length ?? summary.frameCount;
+      summary.keyframesLoaded = true;
+    } catch {
+      summary.keyframesLoaded = false;
+    }
+  }
+  if (project.outputs?.image_cards && !cached.cardsLoaded) {
+    try {
+      const imageCards = await apiFile(project.project_id, "image_cards");
+      summary.cardCount = imageCards.card_count ?? imageCards.cards?.length ?? summary.cardCount;
+      summary.cardsLoaded = true;
+    } catch {
+      summary.cardsLoaded = false;
+    }
+  }
+  if (project.outputs?.toutiao_image_cards && !cached.toutiaoCardsLoaded) {
+    try {
+      const imageCards = await apiFile(project.project_id, "toutiao_image_cards");
+      summary.toutiaoCardCount = imageCards.card_count ?? imageCards.cards?.length ?? summary.toutiaoCardCount;
+      summary.toutiaoCardsLoaded = true;
+    } catch {
+      summary.toutiaoCardsLoaded = false;
+    }
+  }
+  state.summaries.set(project.project_id, summary);
+  return summary;
+}
+
+async function loadStatus(projectId) {
+  const status = await apiGet(`/api/projects/${projectId}/status`);
+  if (projectId === state.activeProjectId) state.activeStatus = status;
+  return status;
+}
+
+async function loadDetail(projectId) {
+  const [record, status] = await Promise.all([apiGet(`/api/projects/${projectId}`), loadStatus(projectId)]);
+  const outputs = status.outputs || record.outputs || {};
+  const files = {};
+  await Promise.allSettled(
+    FILE_KINDS.map(async ([kind]) => {
+      if (!outputs[kind]) return;
+      files[kind] = await apiFile(projectId, kind);
+    }),
+  );
+  state.detail = { projectId, record, status, files };
+  state.activeProjectId = projectId;
+  window.localStorage.setItem("xhs.activeProjectId", projectId);
+  await hydrateProjectSummary(record);
+  return state.detail;
+}
+
+async function loadWorkbenchDetail(projectId) {
+  if (!projectId) {
+    state.workbenchDetail = null;
+    return null;
+  }
+  const [record, status] = await Promise.all([apiGet(`/api/projects/${projectId}`), loadStatus(projectId)]);
+  const outputs = status.outputs || record.outputs || {};
+  const files = {};
+  await Promise.allSettled(
+    FILE_KINDS.map(async ([kind]) => {
+      if (!outputs[kind]) return;
+      files[kind] = await apiFile(projectId, kind);
+    }),
+  );
+  state.workbenchDetail = { projectId, record, status, files };
+  await hydrateProjectSummary(record);
+  return state.workbenchDetail;
+}
+
+function renderDashboardSkeleton() {
+  shell({
+    title: "视频图文生产工作台",
+    mark: "D",
+    subtitle: "左侧输入视频链接，两步产出平台图文稿和图片卡片。",
+    actions: `<button class="ghost-button" data-action="refresh-dashboard" type="button">刷新</button>`,
+    body: `<div class="workbench-layout">${loadingPanel("输入区")}${loadingPanel("解析与产出")}</div>`,
+  });
+}
+
+async function renderDashboard() {
+  renderDashboardSkeleton();
+  try {
+    const [settings] = await Promise.all([
+      apiGet("/api/settings/llm").catch(() => null),
+      loadProjects(),
+      state.activeProjectId ? loadStatus(state.activeProjectId).catch(() => null) : null,
+    ]);
+    state.llmSettings = settings;
+    if (state.activeProjectId) {
+      await loadWorkbenchDetail(state.activeProjectId).catch(() => {
+        state.workbenchDetail = null;
+      });
+    }
+  } catch (error) {
+    shell({
+      title: "视频图文生产工作台",
+      mark: "D",
+      subtitle: "后端数据读取失败。",
+      body: errorState(errorText(error)),
+    });
+    return;
+  }
+  shell({
+    title: "视频图文生产工作台",
+    mark: "D",
+    subtitle: "一键分析解析，确认后再一键产出图文。",
+    actions: `<button class="ghost-button" data-action="refresh-dashboard" type="button">刷新</button>`,
+    body: `
+      <div class="workbench-layout">
+        <aside class="input-rail">
+          ${renderCreateJobPanel()}
+          ${renderWorkbenchStatusCard()}
+          ${renderRecentProjectsCompact()}
+        </aside>
+        <div class="workbench-main">
+          ${renderAnalysisReadablePanel(state.workbenchDetail)}
+          ${renderProducePanel(state.workbenchDetail)}
+        </div>
+      </div>
+    `,
+  });
+  if (state.activeProjectId && shouldContinuePolling(state.activeProjectId, state.activeStatus?.status)) {
+    startPolling(state.activeProjectId);
+  }
+}
+
+function renderCreateJobPanel() {
+  const detail = state.workbenchDetail;
+  const route = currentContentRoute();
+  const status = detail?.status?.status || state.activeStatus?.status || "";
+  const hasAnalysis = Boolean(detail?.files?.content_assets);
+  const hasPost = routeHasPost(detail, route);
+  const hasCards = routeHasCards(detail, route);
+  const selectedRouteStatus = routeStatus(detail?.status || state.activeStatus, route);
+  const llmReady = state.llmSettings ? (!state.llmSettings.auth_required || state.llmSettings.api_key_configured) : false;
+  const canProduceArticle = Boolean(detail?.status?.can_produce && hasAnalysis && !isRunning(status) && llmReady);
+  const canGenerateImages = Boolean(selectedRouteStatus.can_generate_images && hasPost && !hasCards && !isRunning(status));
+  const produceReady = canProduceArticle || canGenerateImages;
+  const produceLabel = canGenerateImages ? "继续生成图片卡片" : "一键产出图文";
+  const llmNote = llmReady
+    ? `LLM 已可用于${route.label}稿生成；图片卡片通过独立生图 API 渲染。`
+    : "LLM 未配置：可分析解析；文章生成不能伪造，已生成文章后仍可单独调用生图 API。";
+  return `
+    <section class="panel workbench-control-card">
+      <div class="panel-header">
+        <div>
+          <h3>视频链接</h3>
+          <p>输入公开视频或已授权视频，先分析解析，再产出图文。</p>
+        </div>
+      </div>
+      <div class="panel-body">
+        <form id="project-form" class="form-grid">
+          <label class="field">
+            视频 URL
+            <textarea id="url" name="url" rows="4" placeholder="https://www.youtube.com/watch?v=..." required></textarea>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              语言
+              <select id="language" name="language">
+                <option value="zh">zh</option>
+                <option value="en">en</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+            <label class="field">
+              内容风格
+              <select id="style" name="style">
+                <option value="干货">干货</option>
+                <option value="教程">教程</option>
+                <option value="测评">测评</option>
+                <option value="观点">观点</option>
+                <option value="清单">清单</option>
+              </select>
+            </label>
+          </div>
+          <label class="field">
+            最大关键帧数量
+            <input id="max_frames" name="max_frames" type="number" min="8" max="20" value="12" />
+          </label>
+          <div class="check-row">
+            <label class="check-field">
+              <input id="use_whisper" name="use_whisper" type="checkbox" checked />
+              <span>无字幕时启用 Whisper</span>
+            </label>
+            <label class="check-field">
+              <input id="use_ocr" name="use_ocr" type="checkbox" checked />
+              <span>启用 OCR 识别</span>
+            </label>
+          </div>
+          <div class="route-selector" aria-label="图文路线">
+            ${Object.values(CONTENT_ROUTES).map((item) => `
+              <button class="route-option ${route.key === item.key ? "active" : ""}" data-action="set-content-route" data-route-key="${item.key}" type="button">
+                <span>${escapeHtml(item.label)}</span>
+                <small>${routeOutputReady(detail?.status?.outputs, item) ? "稿件已生成" : "待生成"}</small>
+              </button>
+            `).join("")}
+          </div>
+          <button id="submit-button" class="button" type="submit" ${isRunning(status) ? "disabled" : ""}>一键分析解析</button>
+          <button id="produce-button" class="ghost-button produce-button" data-action="produce-project" type="button" ${produceReady ? "" : "disabled"}>
+            ${escapeHtml(produceLabel)}
+          </button>
+          <div class="small-text">
+            ${escapeHtml(llmNote)}
+          </div>
+          <div id="create-error"></div>
+        </form>
+      </div>
+    </section>
+  `;
+}
+
+function renderWorkbenchStatusCard() {
+  const status = state.activeStatus;
+  if (!state.activeProjectId || !status) {
+    return `
+      <section id="workbench-status-card" class="panel pad">
+        <div class="section-title">
+          <h3>两步流程</h3>
+          <p>Analyze 生成创作底稿，Produce 生成文章，生图 API 渲染 PNG 卡片。</p>
+        </div>
+        <div class="step-rail">
+          <div class="step-card active"><b>1</b><span>一键分析解析</span></div>
+          <div class="step-card"><b>2</b><span>一键产出平台稿</span></div>
+          <div class="step-card"><b>3</b><span>独立生图 API 出卡片</span></div>
+        </div>
+      </section>
+    `;
+  }
+  return `
+    <section id="workbench-status-card" class="panel pad stack">
+      <div class="row between wrap">
+        <div class="section-title" style="margin:0">
+          <h3>当前任务</h3>
+          <p class="mono">${escapeHtml(state.activeProjectId)}</p>
+        </div>
+        ${statusPill(status.status)}
+      </div>
+      ${renderProgressSummary(status)}
+      ${status.error ? errorState(errorText(status.error)) : ""}
+      ${renderStatusTimeline(status)}
+      ${renderProgressLogPanel(status)}
+    </section>
+  `;
+}
+
+function renderProgressSummary(statusData) {
+  const progress = statusData?.progress;
+  if (!progress) return "";
+  const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+  const remaining = estimateLabel(progress.remaining_seconds, progress.eta_confidence);
+  const note = progress.eta_confidence === "low" ? "预计时间波动较大" : "预计时间会随处理进度更新";
+  return `
+    <div class="progress-summary">
+      <div class="row between wrap">
+        <div>
+          <span class="progress-eyebrow">${escapeHtml(progress.mode_label || "执行进度")}</span>
+          <h4>当前阶段：${escapeHtml(progress.current_step_label || statusLabel(statusData.status))}</h4>
+          <p>${escapeHtml(progress.current_step_description || statusHint(statusData.status))}</p>
+        </div>
+        <strong>${percent}%</strong>
+      </div>
+      <div class="progress-bar" aria-label="任务进度">
+        <span class="progress-fill" style="width:${percent}%"></span>
+      </div>
+      <div class="progress-metrics">
+        <div><span>已用时</span><b>${escapeHtml(secondsLabel(progress.elapsed_seconds))}</b></div>
+        <div><span>预计剩余</span><b>${escapeHtml(remaining)}</b></div>
+        <div><span>阶段</span><b>${Number(progress.completed_steps || 0)}/${Number(progress.total_steps || 0)}</b></div>
+      </div>
+      <p class="small-text">${escapeHtml(note)}。${escapeHtml(progress.estimate_note || "")}</p>
+    </div>
+  `;
+}
+
+function renderRecentProjectsCompact() {
+  const projects = state.projects.slice(0, 4);
+  return `
+    <section class="panel pad">
+      <div class="row between">
+        <div class="section-title" style="margin:0"><h3>最近项目</h3><p>真实 runtime 记录</p></div>
+        <a class="ghost-button" href="/projects" data-route="/projects">全部</a>
+      </div>
+      <div class="recent-list">
+        ${projects.length ? projects.map((project) => {
+          const summary = state.summaries.get(project.project_id) || {};
+          return `
+            <button class="recent-project ${state.activeProjectId === project.project_id ? "active" : ""}" data-action="select-project" data-project-id="${project.project_id}" type="button">
+              <span>${escapeHtml(textSnippet(summary.title || project.project_id, 42))}</span>
+              <small>${escapeHtml(statusLabel(project.status))} · ${Number(summary.frameCount || 0)} 帧 · ${Number(summary.cardCount || 0)} 卡</small>
+            </button>
+          `;
+        }).join("") : emptyState("暂无项目", "提交链接后会出现在这里。")}
+      </div>
+    </section>
+  `;
+}
+
+function renderAnalysisReadablePanel(detail) {
+  if (!detail) {
+    return `
+      <section class="panel pad analysis-panel">
+        <div class="section-title">
+          <h3>信息提炼</h3>
+          <p>点击左侧“一键分析解析”后，这里会展示视频信息、创作底稿、来源字幕和关键帧依据。</p>
+        </div>
+        ${emptyState("等待视频分析", "这里不会展示假数据；只有后端生成真实 runtime 产物后才会出现内容。")}
+      </section>
+    `;
+  }
+  const metadata = detail.files.metadata || {};
+  const assets = detail.files.content_assets;
+  const transcript = detail.files.transcript;
+  const frames = mergedFrames(detail).slice(0, 8);
+  return `
+    <section id="analysis-readable-panel" class="panel pad analysis-panel">
+      <div class="row between wrap">
+        <div class="section-title">
+          <h3>信息提炼结果</h3>
+          <p>普通创作者可读的创作底稿，可编辑后保存并作为原创图文产出输入。</p>
+        </div>
+        <div class="row wrap">
+          <button class="ghost-button" data-action="save-content-assets" type="button" ${assets ? "" : "disabled"}>保存创作底稿</button>
+          <a class="ghost-button" href="/projects/${detail.projectId}" data-route="/projects/${detail.projectId}">详情</a>
+        </div>
+      </div>
+      ${detail.status.error ? errorState(errorText(detail.status.error)) : ""}
+      ${renderWorkbenchMetadata(metadata, detail)}
+      ${assets ? renderEditableAssets(assets) : emptyState("创作底稿尚未生成", "Analyze 完成后会生成 content-assets.json。")}
+      ${transcript ? renderTranscriptSummary(transcript) : ""}
+      ${frames.length ? renderKeyframeSummaryStrip(detail, frames) : ""}
+      <div id="analysis-save-message"></div>
+    </section>
+  `;
+}
+
+function renderWorkbenchMetadata(metadata, detail) {
+  const title = metadata.title || detail.projectId;
+  const thumbnail = metadata.thumbnail;
+  return `
+    <div class="video-summary-card">
+      <div class="thumbnail">
+        ${thumbnail ? `<img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(title)}" />` : ""}
+      </div>
+      <div class="stack">
+        <div class="row between wrap">
+          <h4>${escapeHtml(title)}</h4>
+          ${statusPill(detail.status.status)}
+        </div>
+        <div class="meta-grid compact-meta">
+          <div class="meta-item"><span>作者</span><b>${escapeHtml(metadata.author || "未知")}</b></div>
+          <div class="meta-item"><span>时长</span><b>${escapeHtml(secondsLabel(metadata.duration))}</b></div>
+          <div class="meta-item"><span>URL</span><a href="${escapeHtml(metadata.url || detail.record.url)}" target="_blank" rel="noreferrer">${escapeHtml(textSnippet(metadata.url || detail.record.url, 48))}</a></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderEditableAssets(assets) {
+  return `
+    <div class="editable-assets">
+      <label class="field">一句话总结
+        <textarea id="asset-summary" data-asset-field="one_sentence_summary">${escapeHtml(assets.one_sentence_summary || "")}</textarea>
+      </label>
+      <div class="editable-grid">
+        ${renderEditableObjectList("核心观点", "core_points", assets.core_points, "point", "why_it_matters")}
+        ${renderEditableObjectList("金句", "golden_quotes", assets.golden_quotes, "quote", "rewrite_note")}
+      </div>
+      <div class="editable-grid">
+        ${renderEditableStringList("受众", "audience", assets.audience)}
+        ${renderEditableStringList("痛点", "pain_points", assets.pain_points)}
+        ${renderEditableStringList("平台选题角度", "xiaohongshu_angles", assets.xiaohongshu_angles)}
+      </div>
+      <details class="asset-details">
+        <summary>来源证据时间点</summary>
+        ${renderAssetList("来源证据", assets.source_evidence, (item) => `<h4>${escapeHtml(item.claim)}</h4><p class="small-text">${escapeHtml(item.source_type)} · ${escapeHtml(item.time)}s · ${escapeHtml(item.source_text || item.source_path || "")}</p>`)}
+      </details>
+    </div>
+  `;
+}
+
+function renderEditableObjectList(title, field, items, primaryKey, secondaryKey) {
+  return `
+    <div class="editable-section" data-edit-section="${field}">
+      <h4>${escapeHtml(title)}</h4>
+      ${(items || []).map((item, index) => `
+        <article class="editable-item">
+          <textarea data-edit-field="${field}" data-index="${index}" data-key="${primaryKey}">${escapeHtml(item?.[primaryKey] || "")}</textarea>
+          <textarea data-edit-field="${field}" data-index="${index}" data-key="${secondaryKey}">${escapeHtml(item?.[secondaryKey] || "")}</textarea>
+        </article>
+      `).join("") || `<p class="small-text">暂无</p>`}
+    </div>
+  `;
+}
+
+function renderEditableStringList(title, field, items) {
+  return `
+    <label class="field editable-section">${escapeHtml(title)}
+      <textarea data-string-list="${field}" placeholder="一行一个">${escapeHtml((items || []).join("\n"))}</textarea>
+    </label>
+  `;
+}
+
+function renderTranscriptSummary(transcript) {
+  const segments = transcript.segments || [];
+  return `
+    <div class="summary-block">
+      <div class="row between wrap">
+        <h4>来源字幕依据</h4>
+        <span class="mini-pill">${segments.length} 段</span>
+      </div>
+      <div class="summary-list">
+        ${segments.slice(0, 8).map((segment) => `
+          <div class="summary-row">
+            <span class="mono">${Number(segment.start || 0).toFixed(1)}s</span>
+            <p>${escapeHtml(textSnippet(segment.text, 150))}</p>
+          </div>
+        `).join("") || '<p class="small-text">暂无字幕片段</p>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderKeyframeSummaryStrip(detail, frames) {
+  return `
+    <div class="summary-block">
+      <div class="row between wrap">
+        <h4>关键帧依据</h4>
+        <span class="mini-pill">${frames.length} 张预览</span>
+      </div>
+      <div class="keyframe-strip">
+        ${frames.map((frame) => `
+          <article class="keyframe-chip">
+            <img src="/api/projects/${detail.projectId}/frames/${escapeHtml(frame.filename)}" alt="${escapeHtml(frame.filename)}" />
+            <b>${Number(frame.time || 0).toFixed(1)}s</b>
+            <span>${escapeHtml(textSnippet(frame.visual?.ocr_text || frame.related_transcript_text || frame.reason, 46))}</span>
+          </article>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderProducePanel(detail) {
+  const route = currentContentRoute();
+  if (!detail) {
+    return `
+      <section id="produce-panel" class="panel pad produce-panel">
+        <div class="section-title">
+          <h3>图文产出</h3>
+          <p>完成 Analyze 并配置 LLM 后，先生成文章，再由独立生图 API 渲染 PNG 卡片。</p>
+        </div>
+        ${emptyState("尚未产出图文", "不会用 prompt 或示例图冒充成品 PNG。")}
+      </section>
+    `;
+  }
+  const post = routePost(detail, route);
+  const cards = routeCards(detail, route);
+  return `
+    <section id="produce-panel" class="panel pad produce-panel">
+      <div class="row between wrap">
+        <div class="section-title">
+          <h3>${escapeHtml(route.title)}</h3>
+          <p>文章由 Produce 生成；PNG 卡片由独立生图 API 渲染，可编辑后重新出图。</p>
+        </div>
+        <div class="row wrap">
+          <button class="ghost-button" data-action="save-post" type="button" ${post ? "" : "disabled"}>保存文章</button>
+          <button class="ghost-button" data-action="save-image-cards" type="button" ${cards ? "" : "disabled"}>保存卡片</button>
+        </div>
+      </div>
+      ${post ? renderArticleEditor(post) : emptyState("文章尚未生成", route.emptyText)}
+      ${cards ? renderImageCardGallery(detail, cards, route) : ""}
+      ${renderWorkbenchDownloads(detail, route)}
+      <div id="produce-save-message"></div>
+    </section>
+  `;
+}
+
+function renderArticleEditor(post) {
+  return `
+    <div class="xhs-editor">
+      <label class="field">标题候选
+        <textarea data-post-field="titles" placeholder="一行一个标题">${escapeHtml((post.titles || []).join("\n"))}</textarea>
+      </label>
+      <label class="field">封面文案
+        <input data-post-field="cover_text" value="${escapeHtml(post.cover_text || "")}" />
+      </label>
+      <label class="field">开头钩子
+        <textarea data-post-field="hook">${escapeHtml(post.hook || "")}</textarea>
+      </label>
+      <label class="field">正文
+        <textarea data-post-field="body" class="long-editor">${escapeHtml(post.body || "")}</textarea>
+      </label>
+      <label class="field">标签
+        <textarea data-post-field="hashtags" placeholder="一行一个标签">${escapeHtml((post.hashtags || []).join("\n"))}</textarea>
+      </label>
+      <div class="asset-item"><h4>发布建议</h4><p>${escapeHtml(post.publish_suggestion || "")}</p></div>
+    </div>
+  `;
+}
+
+function renderImageCardGallery(detail, imageCards, route = currentContentRoute()) {
+  const cards = imageCards.cards || [];
+  return `
+    <div class="image-card-gallery" id="image-card-gallery">
+      <div class="row between wrap">
+        <h4>${escapeHtml(route.label)}图文卡片 PNG</h4>
+        <span class="mini-pill">${cards.length} 张卡片</span>
+      </div>
+      <div class="card-grid">
+        ${cards.map((card, index) => {
+          const filename = frameFilename(card.output_path);
+          return `
+            <article class="image-card-preview" data-card-index="${index}">
+              <img src="/api/projects/${detail.projectId}/${route.cardFilePath}/${escapeHtml(filename)}?v=${encodeURIComponent(detail.record.updated_at || "")}" alt="${escapeHtml(card.title || filename)}" />
+              <div class="card-edit">
+                <span class="mini-pill">P${escapeHtml(card.page)} · ${escapeHtml(card.role)}</span>
+                <label class="field">图片标题
+                  <input data-card-field="title" data-card-index="${index}" value="${escapeHtml(card.title || "")}" />
+                </label>
+                <label class="field">图片说明
+                  <textarea data-card-field="caption" data-card-index="${index}">${escapeHtml(card.caption || "")}</textarea>
+                </label>
+                <p class="small-text">来源关键帧：${escapeHtml(card.source_frame_time ?? "n/a")}s</p>
+                <a class="ghost-button" href="/api/projects/${detail.projectId}/${route.cardFilePath}/${escapeHtml(filename)}" target="_blank" rel="noreferrer">下载 PNG</a>
+              </div>
+            </article>
+          `;
+        }).join("") || emptyState("暂无卡片", `产出步骤会在 runtime/projects/{id}/${route.cardFilePath}/ 生成 PNG。`)}
+      </div>
+    </div>
+  `;
+}
+
+function renderWorkbenchDownloads(detail, route = currentContentRoute()) {
+  const outputs = detail.status.outputs || {};
+  return `
+    <div class="download-strip">
+      <a class="ghost-button ${outputs[route.postMd] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.postMd}">Markdown</a>
+      <a class="ghost-button ${outputs[route.postJson] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.postJson}">文章 JSON</a>
+      <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.cards}">卡片 JSON</a>
+      <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/${route.cardsDownloadPath}">卡片 ZIP</a>
+      <a class="ghost-button ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">关键帧 ZIP</a>
+      <a class="button" href="/api/projects/${detail.projectId}/download">完整 ZIP</a>
+    </div>
+  `;
+}
+
+function renderCurrentTaskPanel() {
+  if (!state.activeProjectId || !state.activeStatus) {
+    return `
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h3>任务状态机</h3>
+            <p>创建任务后在这里查看每个阶段的状态、耗时和产物登记。</p>
+          </div>
+        </div>
+        <div class="panel-body">${emptyState("尚无当前任务", "粘贴视频 URL 并开始处理。")}</div>
+      </section>
+    `;
+  }
+  return `
+    <section id="current-task-panel" class="panel">
+      <div class="panel-header">
+        <div>
+          <h3>任务状态机</h3>
+          <p class="mono">${escapeHtml(state.activeProjectId)}</p>
+        </div>
+        <div class="row wrap">
+          ${statusPill(state.activeStatus.status)}
+          <a class="ghost-button" href="/projects/${state.activeProjectId}" data-route="/projects/${state.activeProjectId}">查看详情</a>
+        </div>
+      </div>
+      <div class="panel-body stack">
+        ${state.activeStatus.error ? errorState(errorText(state.activeStatus.error)) : ""}
+        ${renderStatusTimeline(state.activeStatus)}
+      </div>
+    </section>
+  `;
+}
+
+function renderStatusTimeline(statusData) {
+  if (statusData?.progress?.steps?.length) {
+    return `
+      <div class="timeline">
+        ${statusData.progress.steps.map((step) => {
+          const klass = {
+            done: "done",
+            running: "active",
+            failed: "failed",
+            pending: "",
+          }[step.state] || "";
+          const elapsed = step.elapsed_seconds === null || step.elapsed_seconds === undefined ? "等待" : secondsLabel(step.elapsed_seconds);
+          const outputsLabel = step.outputs_expected ? `${step.outputs_ready}/${step.outputs_expected} 产物` : "无产物";
+          return `
+            <div class="timeline-step ${klass}">
+              <span class="timeline-dot"></span>
+              <div><b>${escapeHtml(step.label)}</b><span>${escapeHtml(step.description)}</span></div>
+              <span class="mini-pill">${escapeHtml(elapsed)} · ${escapeHtml(outputsLabel)}</span>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+  const currentStatus = statusData?.status || "created";
+  const errorStep = statusData?.error?.step;
+  const activeStep = currentStatus === "failed" ? errorStep || statusData?.logs?.at(-1)?.status || "created" : currentStatus;
+  const activeIndex = STATUS_STEPS.findIndex(([step]) => step === activeStep);
+  const outputs = statusData?.outputs || {};
+  return `
+    <div class="timeline">
+      ${STATUS_STEPS.map(([step, label, hint], index) => {
+        const stageOutputs = STAGE_OUTPUTS[step] || [];
+        const readyCount = stageOutputs.filter((kind) => outputs[kind]).length;
+        const first = firstLogTime(statusData, step);
+        const next = nextLogTime(statusData, step);
+        const elapsed = first ? secondsLabel(durationBetween(first, next || statusData.updated_at || new Date().toISOString())) : "等待";
+        const isDone = currentStatus === "completed" || (activeIndex >= 0 && index < activeIndex);
+        const isActive = step === activeStep && currentStatus !== "completed";
+        const isFailed = currentStatus === "failed" && step === activeStep;
+        const klass = `${isDone ? "done" : ""} ${isActive ? "active" : ""} ${isFailed ? "failed" : ""}`;
+        const countLabel = stageOutputs.length ? `${readyCount}/${stageOutputs.length} 产物` : "等待";
+        return `
+          <div class="timeline-step ${klass}">
+            <span class="timeline-dot"></span>
+            <div><b>${escapeHtml(label)}</b><span>${escapeHtml(hint)}</span></div>
+            <span class="mini-pill">${escapeHtml(elapsed)} · ${escapeHtml(countLabel)}</span>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function firstLogTime(statusData, step) {
+  return (statusData?.logs || []).find((log) => log.status === step)?.time || null;
+}
+
+function nextLogTime(statusData, step) {
+  const logs = statusData?.logs || [];
+  const currentIndex = logs.findIndex((log) => log.status === step);
+  if (currentIndex < 0) return null;
+  const next = logs.slice(currentIndex + 1).find((log) => log.status !== step);
+  return next?.time || null;
+}
+
+function renderProgressLogPanel(statusData) {
+  return `
+    <section id="progress-log-panel" class="panel">
+      <div class="panel-header">
+        <div>
+          <h3>实时进度日志</h3>
+          <p>页面自动轮询 /api/projects/{id}/status；错误和详情保留原始信息，方便排查。</p>
+        </div>
+        <button class="ghost-button" data-action="copy-logs" type="button">复制日志</button>
+      </div>
+      <div class="panel-body">
+        ${renderLogTable(statusData?.logs || [])}
+      </div>
+    </section>
+  `;
+}
+
+function renderLogTable(logs) {
+  if (!logs.length) return emptyState("暂无日志", "任务提交后会显示后端实时进度日志。");
+  return `
+    <div class="table-wrap">
+      <table id="logs" class="log-table">
+        <thead><tr><th>时间</th><th>阶段</th><th>消息</th><th>详情</th></tr></thead>
+        <tbody>
+          ${logs.map((log) => `
+            <tr>
+              <td class="mono subtle">${escapeHtml(safeDate(log.time))}</td>
+              <td>${statusPill(log.status)}</td>
+              <td>${escapeHtml(logMessageZh(log.message))}</td>
+              <td class="mono small-text">${log.details ? escapeHtml(JSON.stringify(log.details)) : ""}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderRecentProjectsPanel() {
+  return `
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <h3>最近项目</h3>
+          <p>真实读取 /api/projects，标题和关键帧数量来自已生成产物。</p>
+        </div>
+        <a class="ghost-button" href="/projects" data-route="/projects">全部项目</a>
+      </div>
+      <div class="panel-body">
+        ${renderProjectTable(state.projects.slice(0, 8), { compact: true })}
+      </div>
+    </section>
+  `;
+}
+
+function renderProjectTable(projects, options = {}) {
+  if (!projects.length) return emptyState("暂无项目", "在生产工作台创建第一个真实处理任务。");
+  return `
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>项目 / 视频</th>
+            <th>状态</th>
+            <th>创建时间</th>
+            <th>耗时</th>
+            <th>关键帧</th>
+            <th>图文稿</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${projects.map((project) => {
+            const summary = state.summaries.get(project.project_id) || {};
+            const elapsed = secondsLabel(durationBetween(project.created_at, project.updated_at));
+            const title = summary.title || project.project_id;
+            const running = isRunning(project.status);
+            return `
+              <tr>
+                <td>
+                  <div class="stack" style="gap: 3px">
+                    <a class="text-button" href="/projects/${project.project_id}" data-route="/projects/${project.project_id}">
+                      ${escapeHtml(textSnippet(title, options.compact ? 48 : 76))}
+                    </a>
+                    <span class="mono small-text">${escapeHtml(project.project_id)} · ${escapeHtml(project.url || "")}</span>
+                  </div>
+                </td>
+                <td>${statusPill(project.status)}</td>
+                <td class="small-text">${escapeHtml(safeDate(project.created_at))}</td>
+                <td class="small-text">${escapeHtml(elapsed)}</td>
+                <td>${Number(summary.frameCount || 0)}</td>
+                <td>${renderProjectRoutePills(project.outputs || {})}</td>
+                <td>
+                  <div class="row wrap">
+                    <a class="ghost-button" href="/projects/${project.project_id}" data-route="/projects/${project.project_id}">查看</a>
+                    <a class="ghost-button" href="/api/projects/${project.project_id}/download">ZIP</a>
+                    <button class="danger-button" data-action="delete-project" data-project-id="${project.project_id}" ${running ? "disabled" : ""} type="button">删除</button>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderProjectRoutePills(outputs) {
+  const ready = Object.values(CONTENT_ROUTES).filter((route) => routeOutputReady(outputs, route));
+  if (!ready.length) return '<span class="mini-pill">未生成</span>';
+  return ready.map((route) => `<span class="mini-pill status-ok">${escapeHtml(route.shortLabel)}</span>`).join(" ");
+}
+
+async function renderProjects() {
+  shell({
+    title: "历史项目",
+    mark: "项",
+    subtitle: "历史项目、产物状态、下载和删除。",
+    actions: `<button class="ghost-button" data-action="refresh-projects" type="button">刷新</button>`,
+    body: loadingPanel("历史项目"),
+  });
+  try {
+    await loadProjects();
+    shell({
+      title: "历史项目",
+      mark: "项",
+      subtitle: "项目列表来自真实 runtime 记录。",
+      actions: `<button class="ghost-button" data-action="refresh-projects" type="button">刷新</button>`,
+      body: `<section class="panel pad">${renderProjectTable(state.projects)}</section>`,
+    });
+  } catch (error) {
+    shell({
+      title: "历史项目",
+      mark: "项",
+      subtitle: "项目读取失败。",
+      body: errorState(errorText(error)),
+    });
+  }
+}
+
+async function renderProjectDetail(projectId) {
+  state.detailTab = routeInfo().tab || state.detailTab || "overview";
+  if (!DETAIL_TABS.some(([tab]) => tab === state.detailTab)) state.detailTab = "overview";
+  shell({
+    title: "项目详情",
+    mark: "详",
+    subtitle: projectId,
+    actions: `<a class="ghost-button" href="/projects" data-route="/projects">返回项目</a>`,
+    body: loadingPanel("项目详情"),
+  });
+  try {
+    await loadDetail(projectId);
+  } catch (error) {
+    shell({
+      title: "项目详情",
+      mark: "详",
+      subtitle: projectId,
+      body: errorState(errorText(error)),
+    });
+    return;
+  }
+  const detail = state.detail;
+  const summary = state.summaries.get(projectId) || {};
+  shell({
+    title: summary.title || "项目详情",
+    mark: "详",
+    subtitle: `${projectId} · ${statusLabel(detail.record.status)}`,
+    actions: renderDetailActions(detail),
+    body: `
+      <div class="grid">
+        ${renderDetailHero(detail)}
+        ${renderDetailTabs(projectId)}
+        <section id="detail-tab-content">${renderDetailTabContent(detail)}</section>
+      </div>
+    `,
+  });
+  if (isRunning(detail.status.status)) {
+    startPolling(projectId);
+  }
+}
+
+function renderDetailActions(detail) {
+  const projectId = detail.projectId;
+  return `
+    <button class="ghost-button" data-action="verify-project" data-project-id="${projectId}" type="button">校验</button>
+    <button class="ghost-button" data-action="rerun-visuals" data-project-id="${projectId}" ${detail.status.can_rerun_visuals ? "" : "disabled"} type="button">重跑视觉</button>
+    <button class="ghost-button" data-action="rerun-downstream" data-project-id="${projectId}" ${detail.status.can_rerun_downstream ? "" : "disabled"} type="button">重跑文案</button>
+    <a class="button" href="/api/projects/${projectId}/download">下载 ZIP</a>
+  `;
+}
+
+function renderDetailHero(detail) {
+  const metadata = detail.files.metadata || {};
+  const summary = state.summaries.get(detail.projectId) || {};
+  const title = metadata.title || summary.title || detail.projectId;
+  const thumbnail = metadata.thumbnail || summary.thumbnail;
+  const duration = metadata.duration ?? summary.duration;
+  const warnings = detail.status.warnings || detail.record.warnings || [];
+  return `
+    <section class="panel pad">
+      <div class="detail-hero">
+        <div class="thumbnail">
+          ${thumbnail ? `<img src="${escapeHtml(thumbnail)}" alt="${escapeHtml(title)}" />` : ""}
+        </div>
+        <div class="stack">
+          <div class="row between wrap">
+            <div>
+              <h3 style="margin: 0 0 6px">${escapeHtml(title)}</h3>
+              <div class="small-text">${escapeHtml(metadata.author || summary.author || "作者未知")}</div>
+            </div>
+            ${statusPill(detail.status.status)}
+          </div>
+          ${detail.status.error ? errorState(errorText(detail.status.error)) : ""}
+          ${warnings.length ? warningState(warnings.join(" / ")) : ""}
+          <div class="meta-grid">
+            <div class="meta-item"><span>项目 ID</span><b class="mono">${escapeHtml(detail.projectId)}</b></div>
+            <div class="meta-item"><span>视频时长</span><b>${escapeHtml(secondsLabel(duration))}</b></div>
+            <div class="meta-item"><span>生成耗时</span><b>${escapeHtml(secondsLabel(durationBetween(detail.record.created_at, detail.record.updated_at)))}</b></div>
+            <div class="meta-item"><span>来源 URL</span><a href="${escapeHtml(metadata.url || detail.record.url)}" target="_blank" rel="noreferrer">${escapeHtml(textSnippet(metadata.url || detail.record.url, 72))}</a></div>
+            <div class="meta-item"><span>创建时间</span><b>${escapeHtml(safeDate(detail.record.created_at))}</b></div>
+            <div class="meta-item"><span>更新时间</span><b>${escapeHtml(safeDate(detail.record.updated_at))}</b></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderDetailTabs(projectId) {
+  return `
+    <div class="tabs" role="tablist">
+      ${DETAIL_TABS.map(([tab, label]) => `
+        <button class="tab-button ${state.detailTab === tab ? "active" : ""}" data-tab="${tab}" data-project-id="${projectId}" type="button">
+          ${escapeHtml(label)}
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderDetailTabContent(detail) {
+  switch (state.detailTab) {
+    case "transcript":
+      return renderTranscriptTab(detail);
+    case "keyframes":
+      return renderKeyframesTab(detail);
+    case "visual":
+      return renderVisualTab(detail);
+    case "assets":
+      return renderAssetsTab(detail);
+    case "xhs":
+      return renderPostTab(detail, CONTENT_ROUTES.xhs);
+    case "toutiao":
+      return renderPostTab(detail, CONTENT_ROUTES.toutiao);
+    case "files":
+      return renderFilesTab(detail);
+    case "overview":
+    default:
+      return renderOverviewTab(detail);
+  }
+}
+
+function renderOverviewTab(detail) {
+  const outputs = detail.status.outputs || {};
+  return `
+    <div class="grid two">
+      <section class="panel pad stack">
+        <div class="section-title">
+          <h3>状态与产物</h3>
+          <p>每个产物只在后端登记且文件存在时显示为可用。</p>
+        </div>
+        ${renderStatusTimeline(detail.status)}
+        <div class="download-grid">
+          ${FILE_KINDS.map(([kind, label, path]) => `
+            <div class="download-card">
+              <b>${escapeHtml(label)}</b>
+              <span class="mono">${escapeHtml(path)}</span>
+              ${outputs[kind] ? '<span class="mini-pill status-ok">已生成</span>' : '<span class="mini-pill">等待中</span>'}
+            </div>
+          `).join("")}
+        </div>
+      </section>
+      <section class="panel pad stack">
+        <div class="section-title">
+          <h3>实时进度日志</h3>
+          <p>失败任务仍可查看已生成中间产物。</p>
+        </div>
+        ${renderLogTable(detail.status.logs || [])}
+      </section>
+    </div>
+  `;
+}
+
+function renderTranscriptTab(detail) {
+  const transcript = detail.files.transcript;
+  if (!transcript) return `<section class="panel pad">${emptyState("字幕尚不可用", "等待“生成字幕时间轴”阶段完成。")}</section>`;
+  const query = state.transcriptQuery.trim().toLowerCase();
+  const segments = (transcript.segments || []).filter((segment) => {
+    if (!query) return true;
+    return [segment.text, segment.source, segment.start, segment.end].join(" ").toLowerCase().includes(query);
+  });
+  return `
+    <section class="panel pad">
+      <div class="search-row">
+        <input id="transcript-search" type="search" value="${escapeHtml(state.transcriptQuery)}" placeholder="搜索字幕文本、来源或时间点" />
+        <span class="status-pill">${segments.length}/${transcript.segments?.length || 0} 段</span>
+      </div>
+      ${segments.length ? `
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>开始</th><th>结束</th><th>字幕文本</th><th>来源</th><th>重要度</th></tr></thead>
+            <tbody>
+              ${segments.map((segment) => `
+                <tr>
+                  <td class="mono">${Number(segment.start || 0).toFixed(3)}s</td>
+                  <td class="mono">${Number(segment.end || 0).toFixed(3)}s</td>
+                  <td>${escapeHtml(segment.text)}</td>
+                  <td class="small-text">${escapeHtml(segment.source)}</td>
+                  <td>${Number(segment.importance || 0).toFixed(2)}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      ` : emptyState("没有匹配的字幕片段", "换一个关键词试试。")}
+    </section>
+  `;
+}
+
+function mergedFrames(detail) {
+  const frames = detail.files.keyframes?.keyframes || [];
+  const visualByFile = new Map();
+  for (const item of detail.files.visual_analysis?.frames || []) {
+    const filename = frameFilename(item.path);
+    if (filename) visualByFile.set(filename, item);
+  }
+  return frames.map((frame, index) => {
+    const filename = frameFilename(frame.path);
+    return { ...frame, filename, index, visual: visualByFile.get(filename) || null };
+  });
+}
+
+function renderKeyframesTab(detail) {
+  const frames = mergedFrames(detail);
+  state.modalFrames = frames;
+  if (!detail.files.keyframes) return `<section class="panel pad">${emptyState("关键帧尚不可用", "等待“抽取关键帧”阶段完成。")}</section>`;
+  if (!frames.length) return `<section class="panel pad">${emptyState("没有关键帧", "后端没有登记可下载的关键帧。")}</section>`;
+  return `
+    <section class="panel pad">
+      <div class="section-title">
+        <h3>关键帧素材</h3>
+        <p>图片来自 /api/projects/{id}/frames/{filename}，点击可放大查看 OCR 与关联字幕。</p>
+      </div>
+      <div id="frames" class="frames-grid">
+        ${frames.map((frame) => `
+          <article class="frame-card">
+            <button class="frame-button" data-action="open-frame" data-frame-index="${frame.index}" type="button">
+              <img src="/api/projects/${detail.projectId}/frames/${escapeHtml(frame.filename)}" alt="frame ${escapeHtml(frame.filename)}" loading="lazy" />
+            </button>
+            <div class="frame-body">
+              <div class="row between">
+                <b>${Number(frame.time || 0).toFixed(2)}s</b>
+                <span class="mini-pill">评分 ${Number(frame.score || 0).toFixed(2)}</span>
+              </div>
+              <p class="small-text">${escapeHtml(textSnippet(frame.reason, 110))}</p>
+              <p class="small-text">${escapeHtml(textSnippet(frame.related_transcript_text, 140))}</p>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderVisualTab(detail) {
+  const visual = detail.files.visual_analysis;
+  if (!visual) return `<section class="panel pad">${emptyState("OCR / 视觉分析尚不可用", "等待“识别画面文字”阶段完成。")}</section>`;
+  const frames = visual.frames || [];
+  return `
+    <section class="panel pad stack">
+      <div class="row between wrap">
+        <div class="section-title">
+          <h3>OCR / 视觉分析</h3>
+          <p>实际 OCR：${escapeHtml(visual.ocr_provider || "unknown")} · 请求 OCR：${escapeHtml(visual.requested_ocr_provider || "n/a")}</p>
+        </div>
+        <span class="status-pill ${visual.warnings?.length ? "status-warning" : "status-ok"}">${visual.warnings?.length || 0} 条警告</span>
+      </div>
+      ${visual.warnings?.length ? warningState(visual.warnings.join(" / ")) : ""}
+      <div class="split-list">
+        ${frames.map((frame) => `
+          <article class="asset-item">
+            <div class="row between wrap">
+              <h4>${Number(frame.time || 0).toFixed(2)}s · ${escapeHtml(frameFilename(frame.path))}</h4>
+              <span class="mini-pill">文字置信度 ${Number(frame.screen_text_confidence || 0).toFixed(2)}</span>
+            </div>
+            <p><b>OCR:</b> ${escapeHtml(frame.ocr_text || "未识别到文字")}</p>
+            <p><b>画面摘要:</b> ${escapeHtml(frame.visual_summary || "n/a")}</p>
+            <p class="small-text"><b>画面指标:</b> ${escapeHtml(frame.frame_metrics ? JSON.stringify(frame.frame_metrics) : "n/a")}</p>
+          </article>
+        `).join("") || emptyState("暂无视觉帧记录", "visual-analysis.json 中没有 frames。")}
+      </div>
+    </section>
+  `;
+}
+
+function renderAssetsTab(detail) {
+  const assets = detail.files.content_assets;
+  if (!assets) return `<section class="panel pad">${emptyState("创作底稿尚不可用", "等待“生成创作底稿”阶段完成。")}</section>`;
+  return `
+    <div class="grid two">
+      <section class="panel pad stack">
+        <div class="section-title"><h3>创作底稿</h3><p>这里保留事实锚点、读者场景和选题方向，最终稿会转化为原创表达。</p></div>
+        <div class="asset-item"><h4>一句话总结</h4><p>${escapeHtml(assets.one_sentence_summary)}</p></div>
+        ${renderAssetList("核心观点", assets.core_points, (item) => `
+          <h4>${escapeHtml(item.point)}</h4>
+          <p>${escapeHtml(item.why_it_matters || "")}</p>
+          <p class="small-text">${escapeHtml((item.evidence || []).map((e) => `${e.type}@${e.time}s ${e.text || e.source_text || ""}`).join(" / "))}</p>
+        `)}
+        ${renderAssetList("金句", assets.golden_quotes, (item) => `<h4>${escapeHtml(item.quote)}</h4><p class="small-text">${escapeHtml(item.time)}s · ${escapeHtml(item.rewrite_note || "")}</p>`)}
+      </section>
+      <section class="panel pad stack">
+        ${renderAssetList("章节", assets.chapters, (item) => `<h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(item.summary || "")}</p><p class="small-text">${escapeHtml(item.start)}s - ${escapeHtml(item.end)}s</p>`)}
+        ${renderAssetList("步骤", assets.steps, (item) => `<h4>${escapeHtml(item.step)}</h4><p class="small-text">evidence_time: ${escapeHtml(item.evidence_time)}</p>`)}
+        ${renderChipBlock("受众", assets.audience)}
+        ${renderChipBlock("痛点", assets.pain_points)}
+        ${renderChipBlock("平台选题角度", assets.xiaohongshu_angles)}
+        ${renderAssetList("来源证据", assets.source_evidence, (item) => `<h4>${escapeHtml(item.claim)}</h4><p class="small-text">${escapeHtml(item.source_type)} · ${escapeHtml(item.time)}s · ${escapeHtml(item.source_text || item.source_path || "")}</p>`)}
+      </section>
+    </div>
+  `;
+}
+
+function renderAssetList(title, items, renderer) {
+  if (!items?.length) return `<div class="asset-item"><h4>${escapeHtml(title)}</h4><p class="small-text">暂无数据</p></div>`;
+  return `
+    <div class="section-title"><h3>${escapeHtml(title)}</h3></div>
+    <div class="split-list">
+      ${items.map((item) => `<article class="asset-item">${renderer(item)}</article>`).join("")}
+    </div>
+  `;
+}
+
+function renderChipBlock(title, items) {
+  return `
+    <div class="asset-item">
+      <h4>${escapeHtml(title)}</h4>
+      <div class="chip-list">${(items || []).map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join("") || '<span class="small-text">暂无数据</span>'}</div>
+    </div>
+  `;
+}
+
+function renderPostTab(detail, route) {
+  const post = routePost(detail, route);
+  if (!post) return `<section class="panel pad">${emptyState(route.emptyPostTitle, "配置 LLM 并重跑文案生成后，这里会显示标题、正文和配图规划。")}</section>`;
+  const prompts = routePrompts(detail, route)?.image_prompts || [];
+  return `
+    <div class="grid two">
+      <section class="panel pad post-preview">
+        <div class="row between wrap">
+          <div class="section-title"><h3>${escapeHtml(route.postPreviewTitle)}</h3><p>正文适合直接复制，仍建议发布前人工复核事实与授权。</p></div>
+          <button class="ghost-button" data-action="copy-text" data-copy-target="${escapeHtml(route.bodyCopyId)}" type="button">复制正文</button>
+        </div>
+        ${renderChipBlock("标题候选", post.titles)}
+        <div class="asset-item"><h4>封面文案</h4><p>${escapeHtml(post.cover_text)}</p></div>
+        <div class="asset-item"><h4>开头钩子</h4><p>${escapeHtml(post.hook)}</p></div>
+        <div id="${escapeHtml(route.bodyCopyId)}" class="post-body">${escapeHtml(post.body)}</div>
+        ${renderChipBlock("标签", post.hashtags)}
+        <div class="asset-item"><h4>发布建议</h4><p>${escapeHtml(post.publish_suggestion || "")}</p></div>
+      </section>
+      <section class="panel pad stack">
+        ${renderAssetList("配图规划", post.image_plan, (item) => `
+          <h4>第 ${escapeHtml(item.page)} 页 · ${escapeHtml(item.role)} · ${escapeHtml(item.caption)}</h4>
+          <p>${escapeHtml(item.content_point || "")}</p>
+          <p class="small-text">来源关键帧：${escapeHtml(item.source_frame_time)}s</p>
+        `)}
+        ${renderAssetList("图片提示词", prompts, (item) => `
+          <h4>第 ${escapeHtml(item.page)} 页 · ${escapeHtml(item.caption)}</h4>
+          <p>${escapeHtml(item.image_prompt)}</p>
+          <p class="small-text"><b>反向提示词:</b> ${escapeHtml(item.negative_prompt)}</p>
+        `)}
+      </section>
+    </div>
+  `;
+}
+
+function renderFilesTab(detail) {
+  const outputs = detail.status.outputs || {};
+  return `
+    <section class="panel pad stack">
+      <div class="section-title">
+        <h3>文件与下载</h3>
+        <p>文件下载全部走后端 /files/{kind}、完整 ZIP 或素材 ZIP。</p>
+      </div>
+      <div class="download-grid">
+        <a id="download-all" class="download-card" href="/api/projects/${detail.projectId}/download">
+          <b>完整 ZIP</b><span>runtime/projects/${escapeHtml(detail.projectId)}</span>
+        </a>
+        <a id="download-frames-zip" class="download-card ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">
+          <b>关键帧素材 ZIP</b><span>frames/*.jpg</span>
+        </a>
+        ${FILE_KINDS.map(([kind, label, path]) => `
+          <a id="download-${kind.replaceAll("_", "-")}" class="download-card ${outputs[kind] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${kind}">
+            <b>${escapeHtml(label)}</b>
+            <span class="mono">${escapeHtml(path)}</span>
+          </a>
+        `).join("")}
+      </div>
+      <pre class="json-view">${prettyJson(outputs)}</pre>
+    </section>
+  `;
+}
+
+async function renderLlmSettings() {
+  shell({
+    title: "文案与生图 API 配置",
+    mark: "LLM",
+    subtitle: "文案 LLM 和生图 API 分开配置，不在前端回显 API Key。",
+    body: loadingPanel("LLM 配置"),
+  });
+  let settings;
+  let imageSettings;
+  try {
+    [settings, imageSettings] = await Promise.all([apiGet("/api/settings/llm"), apiGet("/api/settings/image")]);
+    state.imageSettings = imageSettings;
+  } catch (error) {
+    shell({ title: "文案与生图 API 配置", mark: "LLM", subtitle: "设置读取失败。", body: errorState(errorText(error)) });
+    return;
+  }
+  shell({
+    title: "文案与生图 API 配置",
+    mark: "LLM",
+    subtitle: "保存后写入 .env 并刷新后端 provider；文案和生图互不混用。",
+    actions: `
+      <button class="ghost-button" data-action="test-llm" type="button">测试文案连接</button>
+      <button class="ghost-button" data-action="test-image-api" type="button">检查生图配置</button>
+      <button class="ghost-button" data-action="test-image-api-real" type="button">真实生成测试图</button>
+    `,
+    body: `
+      <div class="grid two">
+        <section class="panel">
+          <div class="panel-header">
+            <div><h3>文案 LLM 配置</h3><p>生成小红书文章、标题、标签和图片提示词。</p></div>
+            <span class="status-pill ${settings.api_key_configured ? "status-ok" : "status-warning"}">${settings.api_key_configured ? "密钥已配置" : "密钥未配置"}</span>
+          </div>
+          <div class="panel-body">
+            <form id="llm-settings-form" class="form-grid">
+              <label class="field">接口地址 Base URL<input name="base_url" value="${escapeHtml(settings.base_url || "")}" placeholder="https://api.openai.com/v1" /></label>
+              <label class="field">模型名称<input name="model" value="${escapeHtml(settings.model || "")}" placeholder="gpt-4o-mini" /></label>
+              <label class="field">API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="留空保持当前密钥" /></label>
+              <div class="field-row">
+                <label class="field">是否要求 API Key
+                  <select name="require_api_key">
+                    ${["auto", "true", "false"].map((item) => `<option value="${item}" ${settings.require_api_key === item ? "selected" : ""}>${item}</option>`).join("")}
+                  </select>
+                </label>
+                <label class="field">最大 Tokens<input name="max_tokens" type="number" min="1" max="64000" value="${escapeHtml(settings.max_tokens || 1200)}" /></label>
+              </div>
+              <div class="field-row">
+                <label class="field">超时时间（毫秒）<input name="timeout_ms" type="number" min="1000" max="600000" value="${escapeHtml(settings.timeout_ms || 60000)}" /></label>
+                <label class="field">最大输入字符<input name="max_chars" type="number" min="1000" max="2000000" value="${escapeHtml(settings.max_chars || 60000)}" /></label>
+              </div>
+              <button class="button" type="submit">保存配置</button>
+              <div id="llm-settings-message"></div>
+            </form>
+          </div>
+        </section>
+        <section class="panel pad stack">
+          <div class="section-title"><h3>连接自检</h3><p>调用 /api/llm/self-test，结果不会包含密钥明文。</p></div>
+          <div class="meta-grid">
+            <div class="meta-item"><span>需要鉴权</span><b>${escapeHtml(settings.auth_required)}</b></div>
+            <div class="meta-item"><span>密钥来源</span><b>${escapeHtml(settings.api_key_source || "none")}</b></div>
+            <div class="meta-item"><span>环境文件</span><b class="mono">${escapeHtml(settings.env_path || "")}</b></div>
+          </div>
+          <pre id="llm-self-test-result" class="json-view">${prettyJson({ status: "waiting" })}</pre>
+        </section>
+      </div>
+      <div class="grid two" style="margin-top: 16px">
+        <section class="panel">
+          <div class="panel-header">
+            <div><h3>生图 API 配置</h3><p>用于外部 Images API；未启用时使用本地模板生成 PNG。</p></div>
+            <span class="status-pill ${imageSettings.enabled ? (imageSettings.api_key_configured || !imageSettings.auth_required ? "status-ok" : "status-warning") : "status-warning"}">
+              ${imageSettings.enabled ? "外部生图已启用" : "使用本地模板"}
+            </span>
+          </div>
+          <div class="panel-body">
+            <form id="image-settings-form" class="form-grid">
+              <label class="check-field">
+                <input name="enabled" type="checkbox" ${imageSettings.enabled ? "checked" : ""} />
+                <span>启用外部生图 API</span>
+              </label>
+              <label class="field">接口地址 Base URL<input name="base_url" value="${escapeHtml(imageSettings.base_url || "")}" placeholder="https://api.openai.com/v1" /></label>
+              <label class="field">生图模型<input name="model" value="${escapeHtml(imageSettings.model || "")}" placeholder="gpt-image-1 / dall-e-3 / provider-model" /></label>
+              <label class="field">API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="留空保持当前密钥" /></label>
+              <div class="field-row">
+                <label class="field">是否要求 API Key
+                  <select name="require_api_key">
+                    ${["auto", "true", "false"].map((item) => `<option value="${item}" ${imageSettings.require_api_key === item ? "selected" : ""}>${item}</option>`).join("")}
+                  </select>
+                </label>
+                <label class="field">图片尺寸<input name="size" value="${escapeHtml(imageSettings.size || "1024x1024")}" placeholder="1024x1024" /></label>
+              </div>
+              <label class="field">超时时间（毫秒）<input name="timeout_ms" type="number" min="1000" max="600000" value="${escapeHtml(imageSettings.timeout_ms || 120000)}" /></label>
+              <button class="button" type="submit">保存生图配置</button>
+              <div id="image-settings-message"></div>
+            </form>
+          </div>
+        </section>
+        <section class="panel pad stack">
+          <div class="section-title"><h3>生图自检</h3><p>“检查配置”只验证环境变量和依赖；“真实生成测试图”会调用外部 Images API 并产生一次真实用量。</p></div>
+          <div class="meta-grid">
+            <div class="meta-item"><span>启用外部 API</span><b>${escapeHtml(imageSettings.enabled)}</b></div>
+            <div class="meta-item"><span>需要鉴权</span><b>${escapeHtml(imageSettings.auth_required)}</b></div>
+            <div class="meta-item"><span>密钥来源</span><b>${escapeHtml(imageSettings.api_key_source || "none")}</b></div>
+            <div class="meta-item"><span>默认渲染器</span><b>${escapeHtml(imageSettings.fallback_renderer || "pillow_template_v1")}</b></div>
+          </div>
+          <pre id="image-self-test-result" class="json-view">${prettyJson({ status: "waiting" })}</pre>
+        </section>
+      </div>
+    `,
+  });
+}
+
+async function renderRuntimeDoctor() {
+  shell({
+    title: "运行诊断",
+    mark: "RT",
+    subtitle: "yt-dlp、ffmpeg、Whisper、PySceneDetect、OpenCV、OCR、LLM 和 runtime 权限诊断。",
+    actions: `<button class="ghost-button" data-action="refresh-runtime" type="button">刷新</button>`,
+    body: loadingPanel("运行诊断"),
+  });
+  try {
+    const doctor = await apiGet("/api/system/doctor");
+    shell({
+      title: "运行诊断",
+      mark: "RT",
+      subtitle: "全部数据来自 /api/system/doctor，不展示假状态。",
+      actions: `<button class="ghost-button" data-action="refresh-runtime" type="button">刷新</button>`,
+      body: renderDoctorBody(doctor),
+    });
+  } catch (error) {
+    shell({ title: "运行诊断", mark: "RT", subtitle: "诊断失败。", body: errorState(errorText(error)) });
+  }
+}
+
+function renderDoctorBody(doctor) {
+  return `
+    <div class="grid">
+      ${doctor.warnings?.length ? warningState(doctor.warnings.map(warningZh).join(" / ")) : ""}
+      <section class="kpi-grid">
+        ${Object.entries(doctor.ready_for || {}).map(([key, value]) => `
+          <div class="kpi"><b>${value ? "可用" : "缺失"}</b><span>${escapeHtml(readyForLabel(key))}</span></div>
+        `).join("")}
+      </section>
+      <div class="grid two">
+        <section class="panel pad">
+          <div class="section-title"><h3>系统命令</h3><p>系统命令路径和版本。</p></div>
+          <div class="diagnostic-matrix">${Object.entries(doctor.commands || {}).map(([name, item]) => renderDiagnosticCard(name, item)).join("")}</div>
+        </section>
+        <section class="panel pad">
+          <div class="section-title"><h3>Python 模块</h3><p>运行链路依赖模块。</p></div>
+          <div class="diagnostic-matrix">${Object.entries(doctor.modules || {}).map(([name, item]) => renderDiagnosticCard(name, item)).join("")}</div>
+        </section>
+      </div>
+      <div class="grid two">
+        <section class="panel pad">
+          <div class="section-title"><h3>OCR 提供方</h3></div>
+          <pre class="json-view">${prettyJson(doctor.ocr || {})}</pre>
+        </section>
+        <section class="panel pad">
+          <div class="section-title"><h3>LLM 提供方</h3></div>
+          <pre class="json-view">${prettyJson(doctor.llm || {})}</pre>
+        </section>
+      </div>
+      <div class="grid two">
+        <section class="panel pad">
+          <div class="section-title"><h3>生图提供方</h3></div>
+          <pre class="json-view">${prettyJson(doctor.image || {})}</pre>
+        </section>
+        <section class="panel pad">
+          <div class="section-title"><h3>Runtime 目录</h3></div>
+          <pre class="json-view">${prettyJson(doctor.runtime || {})}</pre>
+        </section>
+      </div>
+    </div>
+  `;
+}
+
+function renderDiagnosticCard(name, item) {
+  return `
+    <article class="diagnostic-card">
+      <div class="row between">
+        <b>${escapeHtml(name)}</b>
+        <span class="mini-pill ${item.available ? "status-ok" : "status-error"}">${item.available ? "可用" : "缺失"}</span>
+      </div>
+      <code>${escapeHtml(item.path || item.version || item.error || "n/a")}</code>
+    </article>
+  `;
+}
+
+function renderNotFound() {
+  shell({
+    title: "页面不存在",
+    mark: "404",
+    subtitle: "这个路由还没有定义。",
+    body: `<section class="panel pad">${emptyState("页面不存在", "返回生产工作台继续操作。")}<p><a class="button" href="/dashboard" data-route="/dashboard">返回生产工作台</a></p></section>`,
+  });
+}
+
+async function renderRoute() {
+  stopPolling();
+  await refreshHealth();
+  const route = routeInfo();
+  if (route.name === "dashboard") return renderDashboard();
+  if (route.name === "projects") return renderProjects();
+  if (route.name === "project-detail") return renderProjectDetail(route.projectId);
+  if (route.name === "llm") return renderLlmSettings();
+  if (route.name === "runtime") return renderRuntimeDoctor();
+  return renderNotFound();
+}
+
+function startPolling(projectId) {
+  stopPolling();
+  state.pollTimer = window.setInterval(async () => {
+    try {
+      const status = await loadStatus(projectId);
+      const route = CONTENT_ROUTES[state.pendingImageGenerationRoute] || currentContentRoute();
+      const selectedRouteStatus = routeStatus(status, route);
+      if (status.status === route.completedStatus && state.pendingImageGenerationProjectId === projectId) {
+        if (selectedRouteStatus.can_generate_images && !status.outputs?.[route.cards]) {
+          try {
+            await apiPost(`/api/projects/${projectId}/${route.imagePath}`, { style: "clean" });
+            toast(route.articleReadyToast);
+          } catch (error) {
+            state.pendingImageGenerationProjectId = "";
+            state.pendingImageGenerationRoute = "";
+            toast(`生图 API 启动失败：${errorText(error)}`);
+            await renderRoute();
+            return;
+          }
+        } else {
+          state.pendingImageGenerationProjectId = "";
+          state.pendingImageGenerationRoute = "";
+        }
+      }
+      if (status.status === "completed" || status.status === "failed") {
+        state.pendingImageGenerationProjectId = "";
+        state.pendingImageGenerationRoute = "";
+      }
+      if (!shouldContinuePolling(projectId, status.status)) {
+        stopPolling();
+        await renderRoute();
+        return;
+      }
+      if (routeInfo().name === "dashboard") {
+        await loadWorkbenchDetail(projectId).catch(() => null);
+        const statusCard = document.querySelector("#workbench-status-card");
+        const analysisPanel = document.querySelector("#analysis-readable-panel");
+        const producePanel = document.querySelector("#produce-panel");
+        if (statusCard) statusCard.outerHTML = renderWorkbenchStatusCard();
+        if (analysisPanel) analysisPanel.outerHTML = renderAnalysisReadablePanel(state.workbenchDetail);
+        if (producePanel) producePanel.outerHTML = renderProducePanel(state.workbenchDetail);
+      }
+    } catch {
+      stopPolling();
+    }
+  }, 1800);
+}
+
+function stopPolling() {
+  if (state.pollTimer) {
+    window.clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+async function submitProject(form) {
+  const submitButton = form.querySelector("#submit-button");
+  const errorBox = form.querySelector("#create-error");
+  submitButton.disabled = true;
+  submitButton.textContent = "分析中...";
+  errorBox.innerHTML = "";
+  const payload = {
+    url: form.elements.url.value.trim(),
+    language: form.elements.language.value,
+    style: form.elements.style.value,
+    max_frames: Number(form.elements.max_frames.value || 12),
+    use_whisper: form.elements.use_whisper.checked,
+    use_ocr: form.elements.use_ocr.checked,
+  };
+  try {
+    const created = await apiPost("/api/projects/analyze", payload);
+    state.activeProjectId = created.project_id;
+    window.localStorage.setItem("xhs.activeProjectId", created.project_id);
+    await loadProjects();
+    await loadStatus(created.project_id);
+    toast(`已开始分析解析：${created.project_id}`);
+    await renderDashboard();
+  } catch (error) {
+    errorBox.innerHTML = errorState(errorText(error));
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = "一键分析解析";
+  }
+}
+
+async function produceActiveProject() {
+  if (!state.activeProjectId) {
+    toast("请先完成一键分析解析。");
+    return;
+  }
+  const route = currentContentRoute();
+  const detail = state.workbenchDetail;
+  const status = detail?.status || state.activeStatus || {};
+  const selectedRouteStatus = routeStatus(status, route);
+  const hasPost = routeHasPost(detail, route);
+  const hasCards = routeHasCards(detail, route);
+  try {
+    if (hasPost && !hasCards && selectedRouteStatus.can_generate_images) {
+      await apiPost(`/api/projects/${state.activeProjectId}/${route.imagePath}`, { style: "clean" });
+      state.pendingImageGenerationProjectId = "";
+      state.pendingImageGenerationRoute = "";
+      toast("已调用独立生图 API，开始生成图片卡片。");
+      await renderDashboard();
+      return;
+    }
+    if (!state.llmSettings || (state.llmSettings.auth_required && !state.llmSettings.api_key_configured)) {
+      toast(route.llmMissingToast);
+      return;
+    }
+    const contentAssets = collectContentAssetsFromEditors();
+    state.pendingImageGenerationProjectId = state.activeProjectId;
+    state.pendingImageGenerationRoute = route.key;
+    await apiPost(`/api/projects/${state.activeProjectId}/${route.producePath}`, { content_assets: contentAssets });
+    toast(route.produceToast);
+    await renderDashboard();
+  } catch (error) {
+    state.pendingImageGenerationProjectId = "";
+    state.pendingImageGenerationRoute = "";
+    toast(errorText(error));
+    await renderDashboard();
+  }
+}
+
+function collectContentAssetsFromEditors() {
+  const detail = state.workbenchDetail;
+  const assets = structuredClone(detail?.files?.content_assets || {});
+  const summary = document.querySelector("#asset-summary");
+  if (summary) assets.one_sentence_summary = summary.value.trim();
+
+  document.querySelectorAll("[data-edit-field]").forEach((node) => {
+    const field = node.dataset.editField;
+    const index = Number(node.dataset.index);
+    const key = node.dataset.key;
+    if (!Array.isArray(assets[field]) || !assets[field][index]) return;
+    assets[field][index][key] = node.value.trim();
+  });
+
+  document.querySelectorAll("[data-string-list]").forEach((node) => {
+    const field = node.dataset.stringList;
+    assets[field] = node.value.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  });
+  return assets;
+}
+
+async function saveContentAssets() {
+  if (!state.activeProjectId || !state.workbenchDetail?.files?.content_assets) return;
+  const message = document.querySelector("#analysis-save-message");
+  try {
+    await apiPatch(`/api/projects/${state.activeProjectId}/content-assets`, collectContentAssetsFromEditors());
+    if (message) message.innerHTML = `<div class="empty-state">解析结果已保存，会作为下一次“一键产出图文”的输入。</div>`;
+    toast("解析结果已保存");
+    await loadWorkbenchDetail(state.activeProjectId);
+  } catch (error) {
+    if (message) message.innerHTML = errorState(errorText(error));
+    toast(errorText(error));
+  }
+}
+
+function collectPostFromEditors(route = currentContentRoute()) {
+  const detail = state.workbenchDetail;
+  const post = structuredClone(routePost(detail, route) || {});
+  const titles = document.querySelector('[data-post-field="titles"]');
+  const coverText = document.querySelector('[data-post-field="cover_text"]');
+  const hook = document.querySelector('[data-post-field="hook"]');
+  const body = document.querySelector('[data-post-field="body"]');
+  const hashtags = document.querySelector('[data-post-field="hashtags"]');
+  if (titles) post.titles = titles.value.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  if (coverText) post.cover_text = coverText.value.trim();
+  if (hook) post.hook = hook.value.trim();
+  if (body) post.body = body.value.trim();
+  if (hashtags) post.hashtags = hashtags.value.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  return post;
+}
+
+async function savePost() {
+  const route = currentContentRoute();
+  if (!state.activeProjectId || !routePost(state.workbenchDetail, route)) return;
+  const message = document.querySelector("#produce-save-message");
+  try {
+    await apiPatch(`/api/projects/${state.activeProjectId}/${route.postPatchPath}`, collectPostFromEditors(route));
+    if (message) message.innerHTML = `<div class="empty-state">${escapeHtml(route.saveMessage)}</div>`;
+    toast("文章已保存");
+    await loadWorkbenchDetail(state.activeProjectId);
+  } catch (error) {
+    if (message) message.innerHTML = errorState(errorText(error));
+    toast(errorText(error));
+  }
+}
+
+function collectImageCardEdits() {
+  const route = currentContentRoute();
+  const cards = structuredClone(routeCards(state.workbenchDetail, route)?.cards || []);
+  document.querySelectorAll("[data-card-field]").forEach((node) => {
+    const index = Number(node.dataset.cardIndex);
+    const field = node.dataset.cardField;
+    if (!cards[index]) return;
+    cards[index][field] = node.value.trim();
+  });
+  return { cards, style: "clean" };
+}
+
+async function saveImageCards() {
+  const route = currentContentRoute();
+  if (!state.activeProjectId || !routeCards(state.workbenchDetail, route)) return;
+  const message = document.querySelector("#produce-save-message");
+  try {
+    await apiPatch(`/api/projects/${state.activeProjectId}/${route.cardsPatchPath}`, collectImageCardEdits());
+    await loadWorkbenchDetail(state.activeProjectId);
+    if (message) message.innerHTML = `<div class="empty-state">图片卡片已重新渲染为 PNG。</div>`;
+    toast("卡片已重新渲染");
+    await renderDashboard();
+  } catch (error) {
+    if (message) message.innerHTML = errorState(errorText(error));
+    toast(errorText(error));
+  }
+}
+
+async function saveLlmSettings(form) {
+  const message = form.querySelector("#llm-settings-message");
+  const button = form.querySelector("button[type='submit']");
+  button.disabled = true;
+  button.textContent = "保存中...";
+  const data = new FormData(form);
+  const payload = {
+    base_url: String(data.get("base_url") || "").trim(),
+    model: String(data.get("model") || "").trim(),
+    require_api_key: String(data.get("require_api_key") || "auto"),
+    max_tokens: Number(data.get("max_tokens") || 1200),
+    timeout_ms: Number(data.get("timeout_ms") || 60000),
+    max_chars: Number(data.get("max_chars") || 60000),
+  };
+  const apiKey = String(data.get("api_key") || "").trim();
+  if (apiKey) payload.api_key = apiKey;
+  try {
+    await apiPut("/api/settings/llm", payload);
+    message.innerHTML = `<div class="empty-state">配置已保存。API Key 未在前端回显。</div>`;
+    toast("LLM 配置已保存");
+  } catch (error) {
+    message.innerHTML = errorState(errorText(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存配置";
+  }
+}
+
+async function runLlmSelfTest() {
+  const output = document.querySelector("#llm-self-test-result");
+  if (!output) return;
+  output.textContent = JSON.stringify({ status: "running" }, null, 2);
+  try {
+    const result = await apiGet("/api/llm/self-test");
+    output.textContent = JSON.stringify(result, null, 2);
+  } catch (error) {
+    output.textContent = errorText(error);
+  }
+}
+
+async function saveImageSettings(form) {
+  const message = form.querySelector("#image-settings-message");
+  const button = form.querySelector("button[type='submit']");
+  button.disabled = true;
+  button.textContent = "保存中...";
+  const data = new FormData(form);
+  const payload = {
+    enabled: data.get("enabled") === "on",
+    base_url: String(data.get("base_url") || "").trim(),
+    model: String(data.get("model") || "").trim(),
+    require_api_key: String(data.get("require_api_key") || "auto"),
+    size: String(data.get("size") || "1024x1024").trim(),
+    timeout_ms: Number(data.get("timeout_ms") || 120000),
+  };
+  const apiKey = String(data.get("api_key") || "").trim();
+  if (apiKey) payload.api_key = apiKey;
+  try {
+    const saved = await apiPut("/api/settings/image", payload);
+    state.imageSettings = saved;
+    message.innerHTML = `<div class="empty-state">生图配置已保存。API Key 未在前端回显。</div>`;
+    toast("生图 API 配置已保存");
+  } catch (error) {
+    message.innerHTML = errorState(errorText(error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "保存生图配置";
+  }
+}
+
+async function runImageSelfTest(real = false) {
+  const output = document.querySelector("#image-self-test-result");
+  if (!output) return;
+  output.textContent = JSON.stringify({ status: real ? "generating_test_image" : "checking_config" }, null, 2);
+  try {
+    const result = await apiGet(`/api/image/self-test${real ? "?real=true" : ""}`);
+    output.textContent = JSON.stringify(result, null, 2);
+  } catch (error) {
+    output.textContent = errorText(error);
+  }
+}
+
+async function deleteProject(projectId) {
+  if (!window.confirm(`确认删除项目 ${projectId}？运行中的任务不会被删除。`)) return;
+  try {
+    await apiDelete(`/api/projects/${projectId}`);
+    state.summaries.delete(projectId);
+    if (state.activeProjectId === projectId) {
+      state.activeProjectId = "";
+      state.activeStatus = null;
+      window.localStorage.removeItem("xhs.activeProjectId");
+    }
+    toast(`项目已删除：${projectId}`);
+    if (routeInfo().name === "project-detail") {
+      navigate("/projects");
+    } else {
+      await renderRoute();
+    }
+  } catch (error) {
+    toast(errorText(error));
+  }
+}
+
+async function rerunProject(projectId, scope) {
+  const endpoint = scope === "visuals" ? "visuals" : "downstream";
+  try {
+    await apiPost(`/api/projects/${projectId}/rerun/${endpoint}`);
+    state.activeProjectId = projectId;
+    window.localStorage.setItem("xhs.activeProjectId", projectId);
+    toast(scope === "visuals" ? "已开始重跑视觉/OCR" : "已开始重跑文案生成");
+    await renderRoute();
+  } catch (error) {
+    toast(errorText(error));
+  }
+}
+
+async function selectWorkbenchProject(projectId) {
+  state.activeProjectId = projectId;
+  window.localStorage.setItem("xhs.activeProjectId", projectId);
+  await renderDashboard();
+}
+
+async function verifyProject(projectId) {
+  try {
+    const result = await apiGet(`/api/projects/${projectId}/verify`);
+    openModal("产物校验", `<pre id="verification" class="json-view">${prettyJson(result)}</pre>`);
+  } catch (error) {
+    openModal("产物校验失败", errorState(errorText(error)));
+  }
+}
+
+function openFrame(index) {
+  const frame = state.modalFrames[Number(index)];
+  if (!frame || !state.detail?.projectId) return;
+  const src = `/api/projects/${state.detail.projectId}/frames/${frame.filename}`;
+  openModal(
+    `关键帧 ${frame.filename}`,
+    `
+      <img src="${escapeHtml(src)}" alt="${escapeHtml(frame.filename)}" />
+      <div class="meta-grid">
+        <div class="meta-item"><span>时间点</span><b>${Number(frame.time || 0).toFixed(3)}s</b></div>
+        <div class="meta-item"><span>评分</span><b>${Number(frame.score || 0).toFixed(3)}</b></div>
+        <div class="meta-item"><span>OCR</span><b>${escapeHtml(textSnippet(frame.visual?.ocr_text || "n/a", 120))}</b></div>
+      </div>
+      <div class="asset-item"><h4>关联字幕</h4><p>${escapeHtml(frame.related_transcript_text || "")}</p></div>
+      <div class="asset-item"><h4>画面摘要</h4><p>${escapeHtml(frame.visual?.visual_summary || "")}</p></div>
+    `,
+  );
+}
+
+function openModal(title, body) {
+  modalRoot.innerHTML = `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+        <div class="modal-header">
+          <h3 style="margin: 0">${escapeHtml(title)}</h3>
+          <button class="ghost-button" data-action="close-modal" type="button">关闭</button>
+        </div>
+        <div class="modal-body">${body}</div>
+      </section>
+    </div>
+  `;
+}
+
+function closeModal() {
+  modalRoot.innerHTML = "";
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("已复制");
+  } catch {
+    toast("复制失败，请手动选择文本。");
+  }
+}
+
+function toast(message) {
+  const existing = document.querySelector(".toast");
+  if (existing) existing.remove();
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.textContent = message;
+  document.body.appendChild(node);
+  window.setTimeout(() => node.remove(), 3200);
+}
+
+document.addEventListener("submit", (event) => {
+  const form = event.target;
+  if (form.id === "project-form") {
+    event.preventDefault();
+    submitProject(form);
+  }
+  if (form.id === "llm-settings-form") {
+    event.preventDefault();
+    saveLlmSettings(form);
+  }
+  if (form.id === "image-settings-form") {
+    event.preventDefault();
+    saveImageSettings(form);
+  }
+});
+
+document.addEventListener("click", async (event) => {
+  const routeLink = event.target.closest("[data-route]");
+  if (routeLink) {
+    event.preventDefault();
+    navigate(routeLink.dataset.route);
+    return;
+  }
+
+  const tabButton = event.target.closest("[data-tab]");
+  if (tabButton) {
+    state.detailTab = tabButton.dataset.tab;
+    const projectId = tabButton.dataset.projectId;
+    window.history.replaceState({}, "", `/projects/${projectId}?tab=${state.detailTab}`);
+    const content = document.querySelector("#detail-tab-content");
+    if (content && state.detail) {
+      content.innerHTML = renderDetailTabContent(state.detail);
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === state.detailTab);
+      });
+    }
+    return;
+  }
+
+  const actionNode = event.target.closest("[data-action]");
+  if (!actionNode) return;
+  const action = actionNode.dataset.action;
+  if (action === "close-modal") {
+    if (event.target.classList.contains("modal-backdrop") || event.target.closest("button")) closeModal();
+  }
+  if (action === "refresh-dashboard" || action === "refresh-projects" || action === "refresh-runtime") await renderRoute();
+  if (action === "set-content-route") {
+    setContentRoute(actionNode.dataset.routeKey);
+    await renderDashboard();
+    return;
+  }
+  if (action === "select-project") await selectWorkbenchProject(actionNode.dataset.projectId);
+  if (action === "produce-project") await produceActiveProject();
+  if (action === "save-content-assets") await saveContentAssets();
+  if (action === "save-post") await savePost();
+  if (action === "save-image-cards") await saveImageCards();
+  if (action === "copy-logs") {
+    const logs = state.activeStatus?.logs || state.detail?.status?.logs || [];
+    await copyText(logs.map((log) => `${safeDate(log.time)} ${statusLabel(log.status)} ${logMessageZh(log.message)}`).join("\n"));
+  }
+  if (action === "copy-text") {
+    const target = document.querySelector(`#${actionNode.dataset.copyTarget}`);
+    if (target) await copyText(target.textContent || "");
+  }
+  if (action === "delete-project") await deleteProject(actionNode.dataset.projectId);
+  if (action === "rerun-visuals") await rerunProject(actionNode.dataset.projectId, "visuals");
+  if (action === "rerun-downstream") await rerunProject(actionNode.dataset.projectId, "downstream");
+  if (action === "verify-project") await verifyProject(actionNode.dataset.projectId);
+  if (action === "open-frame") openFrame(actionNode.dataset.frameIndex);
+  if (action === "test-llm") await runLlmSelfTest();
+  if (action === "test-image-api") await runImageSelfTest(false);
+  if (action === "test-image-api-real") await runImageSelfTest(true);
+});
+
+document.addEventListener("input", (event) => {
+  if (event.target.id === "transcript-search") {
+    state.transcriptQuery = event.target.value;
+    const content = document.querySelector("#detail-tab-content");
+    if (content && state.detail) content.innerHTML = renderDetailTabContent(state.detail);
+    const input = document.querySelector("#transcript-search");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }
+});
+
+window.addEventListener("popstate", renderRoute);
+
+renderRoute();
