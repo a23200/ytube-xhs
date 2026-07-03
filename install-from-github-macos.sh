@@ -38,7 +38,7 @@ Options:
   -h, --help             Show help
 
 Remote one-liner example:
-  YTXHS_REF=macmini-v20260704.2 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.2/install-from-github-macos.sh)"
+  YTXHS_REF=macmini-v20260704.3 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.3/install-from-github-macos.sh)"
 
 Private repository fallback:
   If this repository is private again later, set GH_TOKEN or authenticate gh CLI
@@ -138,11 +138,14 @@ trap cleanup EXIT
 download_with_curl() {
   local url="$1"
   local output="$2"
-  local -a headers=()
   if [ -n "${GH_TOKEN:-}" ]; then
-    headers=(-H "Authorization: Bearer ${GH_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28")
+    curl -fL --retry 3 --connect-timeout 20 \
+      -H "Authorization: Bearer ${GH_TOKEN}" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "$url" -o "$output"
+  else
+    curl -fL --retry 3 --connect-timeout 20 "$url" -o "$output"
   fi
-  curl -fL --retry 3 --connect-timeout 20 "${headers[@]}" "$url" -o "$output"
 }
 
 download_source() {
