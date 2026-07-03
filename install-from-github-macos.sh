@@ -38,7 +38,7 @@ Options:
   -h, --help             Show help
 
 Remote one-liner example:
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/install-from-github-macos.sh)"
+  YTXHS_REF=macmini-v20260704.2 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.2/install-from-github-macos.sh)"
 
 Private repository fallback:
   If this repository is private again later, set GH_TOKEN or authenticate gh CLI

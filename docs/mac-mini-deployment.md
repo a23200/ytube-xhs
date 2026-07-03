@@ -22,7 +22,7 @@ brew --version
 在 Mac mini 上：
 
 ```bash
-YTXHS_REF=macmini-v20260704.1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.1/install-from-github-macos.sh)"
+YTXHS_REF=macmini-v20260704.2 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.2/install-from-github-macos.sh)"
 ```
 
 默认安装到：
@@ -43,7 +43,7 @@ YTXHS_REF=macmini-v20260704.1 bash -c "$(curl -fsSL https://raw.githubuserconten
 export YTXHS_REF="main"
 export YTXHS_PORT="8012"
 export YTXHS_APP_DIR="/opt/ytube-xhs"
-YTXHS_REF=macmini-v20260704.1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.1/install-from-github-macos.sh)"
+YTXHS_REF=macmini-v20260704.2 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.2/install-from-github-macos.sh)"
 ```
 
 脚本会自动下载 GitHub 源码包，再调用项目内 `deploy/macos/install_macos.sh` 完成本地依赖、虚拟环境和 launchd 服务安装。
@@ -227,7 +227,7 @@ GitHub 方式：
 
 ```bash
 export YTXHS_REF="main"
-YTXHS_REF=macmini-v20260704.1 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.1/install-from-github-macos.sh)"
+YTXHS_REF=macmini-v20260704.2 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.2/install-from-github-macos.sh)"
 sudo /opt/ytube-xhs/deploy/macos/manage.sh self-test
 ```
 
