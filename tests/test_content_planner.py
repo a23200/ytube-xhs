@@ -177,3 +177,31 @@ def test_build_content_assets_rejects_non_object_llm_payload(tmp_path: Path, mon
     error = exc_info.value.to_dict()
     assert error["code"] == "llm_contract_invalid"
     assert error["details"]["payload_type"] == "list"
+
+
+def test_build_basic_content_assets_writes_source_grounded_fallback(tmp_path: Path):
+    paths = _paths(tmp_path)
+
+    payload = content_planner.build_basic_content_assets(
+        metadata={
+            "video_id": "v1",
+            "url": "https://example.com/video",
+            "title": "测试视频标题",
+            "author": "作者",
+            "duration": 2,
+        },
+        transcript_payload=_transcript(),
+        keyframes_payload={"keyframes": []},
+        visual_payload={"frames": []},
+        language="zh",
+        style="干货",
+        paths=paths,
+        fallback_reason="LLM timeout",
+    )
+
+    assert payload["analysis_mode"] == "local_basic_fallback"
+    assert payload["fallback_reason"] == "LLM timeout"
+    assert payload["core_points"][0]["evidence"][0]["type"] == "transcript"
+    assert payload["source_evidence"][0]["source_text"] == SOURCE_TEXT
+    saved = read_json(paths.analysis_dir / "content-assets.json")
+    assert saved["analysis_mode"] == "local_basic_fallback"

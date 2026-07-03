@@ -13,6 +13,9 @@ LANGUAGE_CANDIDATES = {
     "en": ["en", "en-US", "en-GB"],
 }
 
+DEFAULT_YTDLP_FORMAT = "bv*[height<=360]+ba/b[height<=360]/best[height<=360]/best"
+PUBLIC_ANDROID_FALLBACK_FORMAT = "18/best[height<=360]/best"
+
 
 def _track_summary(tracks: Dict[str, Any]) -> Dict[str, Any]:
     formats_by_language: Dict[str, list[str]] = {}
@@ -243,17 +246,24 @@ def _yt_dlp_error(code: str, message: str, raw_error: str) -> PipelineError:
     )
 
 
-def _base_ydl_opts(output_template: str, language: str, *, download: bool) -> Dict[str, Any]:
+def _base_ydl_opts(
+    output_template: str,
+    language: str,
+    *,
+    download: bool,
+    format_selector: str = DEFAULT_YTDLP_FORMAT,
+    player_clients: Optional[list[str]] = None,
+    use_cookies: bool = True,
+    write_subtitles: bool = True,
+) -> Dict[str, Any]:
     ydl_opts: Dict[str, Any] = {
         "outtmpl": output_template,
-        "format": "bv*[height<=360]+ba/b[height<=360]/best[height<=360]/best",
+        "format": format_selector,
         "merge_output_format": "mp4",
         "noplaylist": True,
         "restrictfilenames": True,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": list(_language_list(language)),
-        "subtitlesformat": "vtt/best",
+        "writesubtitles": write_subtitles,
+        "writeautomaticsub": write_subtitles,
         "ignoreerrors": False,
         "quiet": True,
         "no_warnings": False,
@@ -261,15 +271,40 @@ def _base_ydl_opts(output_template: str, language: str, *, download: bool) -> Di
         "fragment_retries": 3,
         "extractor_args": {
             "youtube": {
-                "player_client": ["web"],
+                "player_client": player_clients or ["web"],
             }
         },
     }
+    if write_subtitles:
+        ydl_opts["subtitleslangs"] = list(_language_list(language))
+        ydl_opts["subtitlesformat"] = "vtt/best"
     if not download:
         ydl_opts["skip_download"] = True
-    _apply_cookie_options(ydl_opts)
+    if use_cookies:
+        _apply_cookie_options(ydl_opts)
     _apply_impersonation_options(ydl_opts)
     return ydl_opts
+
+
+def _public_android_fallback_opts(output_template: str, language: str) -> Dict[str, Any]:
+    """Fallback for public YouTube videos whose web-client media URLs return 403.
+
+    Some public videos expose a progressive 360p MP4 to the Android client even
+    when the web client returns SABR/PO-token-gated media URLs that this runtime
+    cannot download. Do not send browser cookies on this fallback: Android
+    clients do not support account cookies in yt-dlp, and public-only fallback
+    should not attempt to bypass login, paid, DRM, or regional restrictions.
+    """
+
+    return _base_ydl_opts(
+        output_template,
+        language,
+        download=True,
+        format_selector=PUBLIC_ANDROID_FALLBACK_FORMAT,
+        player_clients=["android"],
+        use_cookies=False,
+        write_subtitles=False,
+    )
 
 
 def _normalize_info(info: Any, url: str) -> Dict[str, Any]:
@@ -379,13 +414,23 @@ def ingest_video(url: str, language: str, paths: ProjectPaths) -> Dict[str, Any]
     output_template = str(paths.source_dir / "%(id)s.%(ext)s")
     subtitle_info: Optional[Dict[str, Any]] = None
     subtitle_path: Optional[Path] = None
+    ingest_warnings: list[str] = []
     preflight_opts = _base_ydl_opts(output_template, language, download=False)
     try:
         with yt_dlp.YoutubeDL(preflight_opts) as ydl:
             subtitle_info = _normalize_info(ydl.extract_info(url, download=True), url)
         subtitle_path = _find_downloaded_subtitle(paths.source_dir, subtitle_info.get("id"))
     except Exception as exc:
-        _raise_ingest_ytdlp_error(str(exc), exc, url, language, paths, output_template)
+        message = str(exc)
+        if _is_media_download_forbidden(message):
+            ingest_warnings.append(
+                (
+                    "The subtitle preflight step hit YouTube media 403 before finding a usable subtitle. "
+                    "Continuing to media download fallback."
+                )
+            )
+        else:
+            _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
 
     ydl_opts = _base_ydl_opts(output_template, language, download=True)
 
@@ -395,6 +440,55 @@ def ingest_video(url: str, language: str, paths: ProjectPaths) -> Dict[str, Any]
     except Exception as exc:
         message = str(exc)
         if _is_media_download_forbidden(message):
+            fallback_opts = _public_android_fallback_opts(output_template, language)
+            try:
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                ingest_warnings.append(
+                    (
+                        "The primary YouTube web-client media download returned 403 Forbidden. "
+                        "Retried with the public Android client without browser cookies and downloaded a low-resolution "
+                        "progressive MP4 fallback."
+                    )
+                )
+            except Exception:
+                if not (subtitle_info and subtitle_path):
+                    _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
+            else:
+                info = _normalize_info(info, url)
+                video_id = info.get("id")
+                video_path = _find_downloaded_video(paths.source_dir, video_id)
+                subtitle_path = _find_downloaded_subtitle(paths.source_dir, video_id) or subtitle_path
+                if not video_path:
+                    if subtitle_info and subtitle_path:
+                        return _write_metadata(
+                            subtitle_info,
+                            paths,
+                            video_path=None,
+                            subtitle_path=subtitle_path,
+                            thumbnail_from_video=False,
+                            ingest_warnings=[
+                                *ingest_warnings,
+                                (
+                                    "YouTube media fallback completed without a usable local video file, so this run "
+                                    "uses public metadata and subtitles only. Keyframe and OCR analysis are skipped "
+                                    "because no video file is available."
+                                ),
+                            ],
+                        )
+                    raise PipelineError(
+                        code="video_file_missing",
+                        message="yt-dlp Android fallback completed but no downloaded video file was found.",
+                        step="ingest",
+                        details={"source_dir": str(paths.source_dir), "video_id": video_id},
+                    )
+                return _write_metadata(
+                    info,
+                    paths,
+                    video_path=video_path,
+                    subtitle_path=subtitle_path,
+                    ingest_warnings=ingest_warnings,
+                )
             if subtitle_info and subtitle_path:
                 metadata = _write_metadata(
                     subtitle_info,
@@ -426,4 +520,4 @@ def ingest_video(url: str, language: str, paths: ProjectPaths) -> Dict[str, Any]
             details={"source_dir": str(paths.source_dir), "video_id": video_id},
         )
 
-    return _write_metadata(info, paths, video_path=video_path, subtitle_path=subtitle_path)
+    return _write_metadata(info, paths, video_path=video_path, subtitle_path=subtitle_path, ingest_warnings=ingest_warnings)

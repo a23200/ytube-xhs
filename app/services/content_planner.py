@@ -127,6 +127,177 @@ def _guard_against_verbatim_copy(payload: Dict[str, Any], transcript_payload: Di
                 )
 
 
+def _first_transcript_segment(transcript_payload: Dict[str, Any]) -> Dict[str, Any]:
+    for segment in transcript_payload.get("segments", []) or []:
+        if isinstance(segment, dict) and clean_text(str(segment.get("text") or "")):
+            return segment
+    return {"start": 0.0, "end": 0.0, "text": "未找到可用字幕片段。"}
+
+
+def _segment_at(transcript_payload: Dict[str, Any], index: int) -> Dict[str, Any]:
+    segments = [segment for segment in transcript_payload.get("segments", []) or [] if isinstance(segment, dict)]
+    if not segments:
+        return _first_transcript_segment(transcript_payload)
+    return segments[min(max(index, 0), len(segments) - 1)]
+
+
+def _short_text(value: Any, *, max_chars: int = 72) -> str:
+    text = clean_text(str(value or ""))
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _time_of(segment: Dict[str, Any]) -> float:
+    try:
+        return float(segment.get("start") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_basic_content_assets(
+    metadata: Dict[str, Any],
+    transcript_payload: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    language: str,
+    style: str,
+    paths: ProjectPaths,
+    *,
+    fallback_reason: str = "",
+) -> Dict[str, Any]:
+    """Create a source-grounded analysis package without an LLM for Analyze mode.
+
+    This is intentionally conservative: it only summarizes the existence of
+    transcript/keyframe/OCR evidence and keeps original transcript text in
+    evidence fields, not in generated claims. Produce mode still requires a real
+    LLM and must not use this fallback to create publishable copy.
+    """
+
+    segments = [segment for segment in transcript_payload.get("segments", []) or [] if isinstance(segment, dict)]
+    first = _segment_at(transcript_payload, 0)
+    middle = _segment_at(transcript_payload, len(segments) // 2 if segments else 0)
+    last = _segment_at(transcript_payload, len(segments) - 1 if segments else 0)
+    title = clean_text(str(metadata.get("title") or "这个视频"))
+    frame_count = len(keyframes_payload.get("keyframes", []) or [])
+    visual_frames = visual_payload.get("frames", []) or []
+    first_visual = next((frame for frame in visual_frames if isinstance(frame, dict)), {})
+    ocr_text = _short_text(first_visual.get("ocr_text"), max_chars=80) if first_visual else ""
+    visual_summary = _short_text(first_visual.get("visual_summary"), max_chars=80) if first_visual else ""
+
+    core_points = [
+        {
+            "point": "围绕视频主题提炼出一个可继续编辑的事实底稿",
+            "why_it_matters": "当前结果来自本地规则降级，可先核对来源证据，再配置稳定 LLM 生成更完整的原创表达。",
+            "evidence": [{"type": "transcript", "time": _time_of(first), "text": str(first.get("text") or "")}],
+        },
+        {
+            "point": "字幕时间轴已生成，可作为后续内容改写和观点提炼的主要依据",
+            "why_it_matters": "有时间点证据能降低误读风险，也方便人工回看原视频语境。",
+            "evidence": [{"type": "transcript", "time": _time_of(middle), "text": str(middle.get("text") or "")}],
+        },
+    ]
+    if frame_count and first_visual:
+        frame_path = first_visual.get("path") or (keyframes_payload.get("keyframes") or [{}])[0].get("path")
+        frame_time = first_visual.get("time") or (keyframes_payload.get("keyframes") or [{}])[0].get("time") or 0.0
+        core_points.append(
+            {
+                "point": "关键帧与 OCR 已完成，可辅助判断画面语境",
+                "why_it_matters": "画面证据适合用于后续选图、卡片构图和补充文字信息。",
+                "evidence": [
+                    {
+                        "type": "keyframe",
+                        "time": frame_time,
+                        "frame_path": frame_path,
+                        "text": visual_summary or ocr_text or "关键帧证据",
+                    }
+                ],
+            }
+        )
+
+    payload = {
+        "one_sentence_summary": f"《{_short_text(title, max_chars=40)}》已完成基础解析，可基于真实字幕和关键帧继续编辑。",
+        "core_points": core_points,
+        "golden_quotes": [
+            {
+                "quote": "先核对证据，再生成适合平台的原创表达。",
+                "time": _time_of(first),
+                "rewrite_note": "本地降级生成的提示语，不引用原字幕。",
+            }
+        ],
+        "chapters": [
+            {
+                "title": "开头信息",
+                "start": _time_of(first),
+                "end": first.get("end"),
+                "summary": "视频开头片段已提取，可用于确认主题和语境。",
+            },
+            {
+                "title": "中段信息",
+                "start": _time_of(middle),
+                "end": middle.get("end"),
+                "summary": "视频中段片段已提取，可用于补充主要论述。",
+            },
+            {
+                "title": "结尾信息",
+                "start": _time_of(last),
+                "end": last.get("end"),
+                "summary": "视频结尾片段已提取，可用于核对收束信息。",
+            },
+        ],
+        "steps": [
+            {"step": "核对字幕证据并删掉不适合发布的原文表达。", "evidence_time": _time_of(first)},
+            {"step": "根据目标平台重新组织观点、标题和封面信息。", "evidence_time": _time_of(middle)},
+        ],
+        "audience": ["需要把视频素材整理成图文底稿的创作者"],
+        "pain_points": ["LLM 暂时不可用或超时，无法自动生成完整原创选题"],
+        "xiaohongshu_angles": [f"{style}型基础解析", "先证据后改写的内容工作流"],
+        "recommended_content_type": f"{style}型二次创作底稿",
+        "source_evidence": [
+            {
+                "claim": "基础解析使用了字幕时间轴中的开头证据",
+                "source_type": "transcript",
+                "time": _time_of(first),
+                "source_text": str(first.get("text") or ""),
+            },
+            {
+                "claim": "基础解析使用了字幕时间轴中的中段证据",
+                "source_type": "transcript",
+                "time": _time_of(middle),
+                "source_text": str(middle.get("text") or ""),
+            },
+        ],
+        "analysis_mode": "local_basic_fallback",
+        "fallback_reason": fallback_reason,
+        "fallback_notice": (
+            "这是 Analyze 阶段的本地基础解析，不是可直接发布文案。请配置稳定 LLM 后执行 Produce，"
+            "或先人工编辑 content-assets.json。"
+        ),
+        "source_metadata": {
+            "url": metadata.get("url"),
+            "title": metadata.get("title"),
+            "author": metadata.get("author"),
+            "video_id": metadata.get("video_id"),
+        },
+    }
+    if frame_count and first_visual:
+        payload["source_evidence"].append(
+            {
+                "claim": "基础解析使用了关键帧或 OCR 证据",
+                "source_type": "keyframe",
+                "time": first_visual.get("time") or (keyframes_payload.get("keyframes") or [{}])[0].get("time") or 0.0,
+                "source_path": first_visual.get("path") or (keyframes_payload.get("keyframes") or [{}])[0].get("path"),
+                "source_text": visual_summary or ocr_text or "关键帧证据",
+            }
+        )
+
+    payload = validate_content_assets(payload)
+    validate_content_asset_anchors(payload, transcript_payload, keyframes_payload, paths)
+    _guard_against_verbatim_copy(payload, transcript_payload)
+    write_json(paths.analysis_dir / "content-assets.json", payload)
+    return payload
+
+
 def build_content_assets(
     metadata: Dict[str, Any],
     transcript_payload: Dict[str, Any],

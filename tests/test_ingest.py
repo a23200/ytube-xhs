@@ -1,6 +1,6 @@
-from pathlib import Path
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -155,12 +155,14 @@ def test_find_downloaded_subtitle_accepts_ttml_and_standardizes_name(tmp_path: P
 
 class FakeYoutubeDL:
     seen_opts = None
+    seen_opts_history = []
     error_message = None
     infos = []
     calls = 0
 
     def __init__(self, opts):
         FakeYoutubeDL.seen_opts = opts
+        FakeYoutubeDL.seen_opts_history.append(opts)
 
     def __enter__(self):
         return self
@@ -177,6 +179,7 @@ class FakeYoutubeDL:
 
 def _install_fake_ytdlp(monkeypatch, error_message: str):
     FakeYoutubeDL.seen_opts = None
+    FakeYoutubeDL.seen_opts_history = []
     FakeYoutubeDL.error_message = error_message
     FakeYoutubeDL.infos = []
     FakeYoutubeDL.calls = 0
@@ -185,6 +188,7 @@ def _install_fake_ytdlp(monkeypatch, error_message: str):
 
 def _install_fake_ytdlp_sequence(monkeypatch, items):
     FakeYoutubeDL.seen_opts = None
+    FakeYoutubeDL.seen_opts_history = []
     FakeYoutubeDL.error_message = None
     FakeYoutubeDL.infos = list(items)
     FakeYoutubeDL.calls = 0
@@ -241,6 +245,52 @@ def test_ingest_reports_media_download_403_with_actionable_guidance(tmp_path: Pa
     assert "403 Forbidden" in error["message"]
     assert error["details"]["cookies_from_browser_configured"] is True
     assert error["details"]["impersonate"] is None
+
+
+def test_ingest_retries_media_403_with_public_android_fallback(tmp_path: Path, monkeypatch):
+    paths = ingest.ProjectPaths(tmp_path / "project")
+    paths.ensure()
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_file", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_from_browser", "chrome")
+    monkeypatch.setattr(ingest.settings, "ytdlp_impersonate", None)
+    monkeypatch.setattr(ingest, "_download_thumbnail", lambda url, output_path: None)
+    FakeYoutubeDL.calls = 0
+    FakeYoutubeDL.seen_opts_history = []
+
+    class SequenceYoutubeDL(FakeYoutubeDL):
+        def __init__(self, opts):
+            super().__init__(opts)
+            self.opts = opts
+
+        def extract_info(self, url, download=True):
+            FakeYoutubeDL.calls += 1
+            if FakeYoutubeDL.calls == 2:
+                raise RuntimeError("ERROR: unable to download video data: HTTP Error 403: Forbidden")
+            if FakeYoutubeDL.calls == 3:
+                (paths.source_dir / "nKL7qoIwFfQ.mp4").write_bytes(b"video")
+            return {
+                "id": "nKL7qoIwFfQ",
+                "webpage_url": url,
+                "title": "Public video",
+                "uploader": "source",
+                "duration": 60,
+                "subtitles": {},
+                "automatic_captions": {},
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=SequenceYoutubeDL))
+
+    metadata = ingest.ingest_video("https://www.youtube.com/watch?v=nKL7qoIwFfQ", "zh", paths)
+
+    assert metadata["video_id"] == "nKL7qoIwFfQ"
+    assert metadata["video_file"] == str(paths.source_dir / "nKL7qoIwFfQ.mp4")
+    assert metadata["ingest_warnings"]
+    fallback_opts = FakeYoutubeDL.seen_opts_history[-1]
+    assert fallback_opts["extractor_args"]["youtube"]["player_client"] == ["android"]
+    assert fallback_opts["format"] == "18/best[height<=360]/best"
+    assert "cookiesfrombrowser" not in fallback_opts
+    assert "cookiefile" not in fallback_opts
+    assert fallback_opts["writesubtitles"] is False
 
 
 def test_ingest_reports_youtube_tls_network_failure_separately(tmp_path: Path, monkeypatch):
@@ -301,7 +351,7 @@ def test_ingest_continues_with_real_subtitles_when_media_download_403(tmp_path: 
     assert metadata["subtitle_file"] == str(paths.source_dir / "subtitles.vtt")
     assert metadata["ingest_warnings"]
     assert read_json(paths.source_dir / "metadata.json")["video_file"] is None
-    assert FakeYoutubeDL.calls == 2
+    assert FakeYoutubeDL.calls == 3
 
 
 def test_apply_impersonation_options_sets_yt_dlp_target(monkeypatch):

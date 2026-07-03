@@ -134,6 +134,8 @@ python scripts/doctor.py --require-full
 
 ## 启动
 
+本地开发：
+
 ```bash
 source .venv/bin/activate
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -169,6 +171,30 @@ Web UI：
 API 文档：
 
 [http://localhost:8000/docs](http://localhost:8000/docs)
+
+## Mac mini 生产部署
+
+如果要在另一台 Mac mini 上独立运行，不依赖 Codex 或开发机，请使用部署包和 `launchd` 方案：
+
+从 GitHub 公开仓库一键安装：
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/install-from-github-macos.sh)"
+```
+
+或者生成离线部署包：
+
+```bash
+./scripts/package_macos_deploy.sh
+```
+
+把 `dist/ytube-xhs-macmini-*.tar.gz` 传到目标机器后执行：
+
+```bash
+sudo deploy/macos/install_macos.sh --app-dir /opt/ytube-xhs --port 8012 --service-user "$USER"
+```
+
+完整步骤见 [`docs/mac-mini-deployment.md`](docs/mac-mini-deployment.md)。生产默认建议端口为 `8012`，开发示例仍使用 `8000`。
 
 终端同步运行一个真实任务：
 

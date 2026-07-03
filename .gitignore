@@ -12,5 +12,6 @@ runtime/logs/
 runtime/*.log
 runtime/*.pid
 runtime/_self_tests/
+dist/
 # Tool caches
 .ruff_cache/

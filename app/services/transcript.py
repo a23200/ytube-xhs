@@ -245,17 +245,34 @@ def _transcribe_with_whisper(audio_path: Path, language: str) -> List[Transcript
             settings.whisper_model,
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
+            local_files_only=True,
         )
     except Exception as exc:
-        raise PipelineError(
-            code="whisper_model_unavailable",
-            message=(
-                "faster-whisper could not load the requested model. Check XHS_WHISPER_MODEL, "
-                "XHS_WHISPER_DEVICE, XHS_WHISPER_COMPUTE_TYPE, network access, and local model cache."
-            ),
-            step="transcript",
-            details={**whisper_context, "error": str(exc), "error_type": type(exc).__name__},
-        ) from exc
+        local_error = exc
+        try:
+            model = WhisperModel(
+                settings.whisper_model,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
+                local_files_only=False,
+            )
+        except Exception as exc:
+            raise PipelineError(
+                code="whisper_model_unavailable",
+                message=(
+                    "faster-whisper could not load the requested model from local cache or remote download. "
+                    "Check XHS_WHISPER_MODEL, XHS_WHISPER_DEVICE, XHS_WHISPER_COMPUTE_TYPE, network access, "
+                    "and local model cache."
+                ),
+                step="transcript",
+                details={
+                    **whisper_context,
+                    "local_error": str(local_error),
+                    "local_error_type": type(local_error).__name__,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
 
     try:
         segments_iter, info = model.transcribe(str(audio_path), language=language if language != "zh" else "zh")

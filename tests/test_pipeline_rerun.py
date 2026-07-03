@@ -303,7 +303,7 @@ def test_downstream_rerun_uses_existing_artifacts(tmp_path: Path, monkeypatch):
     assert verify_project(paths.project_dir)["completed_ok"] is True
 
 
-def test_analysis_pipeline_requires_llm_and_does_not_fake_analysis_assets(tmp_path: Path, monkeypatch):
+def test_analysis_pipeline_uses_local_basic_assets_when_llm_fails(tmp_path: Path, monkeypatch):
     test_store = ProjectStore(tmp_path)
     monkeypatch.setattr(pipeline, "store", test_store)
     record = test_store.create(
@@ -371,17 +371,20 @@ def test_analysis_pipeline_requires_llm_and_does_not_fake_analysis_assets(tmp_pa
     pipeline.run_project_analysis_pipeline(record.project_id)
 
     updated = test_store.get(record.project_id)
-    assert updated.status == "failed"
-    assert updated.error["code"] == "llm_unavailable"
+    assert updated.status == "analysis_completed"
+    assert updated.error is None
     assert updated.outputs["metadata"] == "source/metadata.json"
     assert updated.outputs["transcript"] == "transcript/transcript.json"
     assert updated.outputs["keyframes"] == "analysis/keyframes.json"
     assert updated.outputs["visual_analysis"] == "analysis/visual-analysis.json"
-    assert "content_assets" not in updated.outputs
+    assert updated.outputs["content_assets"] == "analysis/content-assets.json"
     assert "xhs_post_json" not in updated.outputs
+    assert updated.warnings
     package = read_json(paths.analysis_dir / "asset-package.json")
-    assert package["status"] == "partial_failed"
-    assert package["content_assets"] is None
+    assert package["status"] == "analysis_completed"
+    assets = read_json(paths.analysis_dir / "content-assets.json")
+    assert assets["analysis_mode"] == "local_basic_fallback"
+    assert "LLM" in assets["fallback_notice"]
     assert not (paths.analysis_dir / "xiaohongshu-post.json").exists()
 
 
@@ -430,6 +433,85 @@ def test_analysis_pipeline_continues_from_transcript_only_ingest(tmp_path: Path,
     assert read_json(paths.analysis_dir / "keyframes.json")["skipped"] is True
     assert read_json(paths.analysis_dir / "visual-analysis.json")["skipped"] is True
     assert read_json(paths.analysis_dir / "content-assets.json")["one_sentence_summary"] == "一句话总结"
+    assert "media 403; transcript-only" in updated.warnings
+
+
+def test_analysis_pipeline_does_not_fallback_for_contract_errors(tmp_path: Path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(pipeline, "store", test_store)
+    record = test_store.create(
+        ProjectCreate(
+            url="https://example.com/video",
+            language="zh",
+            style="干货",
+            use_whisper=True,
+            max_frames=8,
+        )
+    )
+    paths = test_store.paths(record.project_id)
+    video_path = paths.source_dir / "source.mp4"
+    frame_path = paths.frames_dir / "frame_0001.jpg"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"mp4")
+    _write_test_jpeg(frame_path)
+
+    def fake_ingest(url, language, paths):
+        payload = {
+            "video_id": "v1",
+            "url": url,
+            "title": "source",
+            "author": "author",
+            "duration": 12,
+            "video_file": str(video_path),
+            "available_subtitles": ["en"],
+            "automatic_captions": [],
+            "ingest_warnings": ["download used fallback"],
+        }
+        write_json(paths.source_dir / "metadata.json", payload)
+        return payload
+
+    def fake_transcript(metadata, language, use_whisper, paths):
+        payload = {
+            "source": "subtitle",
+            "segment_count": 1,
+            "segments": [{"start": 0.0, "end": 1.0, "text": "这是一段原始证据文本，需要被二次整理。", "source": "subtitle"}],
+        }
+        write_json(paths.transcript_dir / "transcript.json", payload)
+        return payload
+
+    def fake_keyframes(metadata, transcript, max_frames, paths):
+        payload = {
+            "frame_count": 1,
+            "keyframes": [{"time": 0.5, "path": str(frame_path), "score": 0.9, "reason": "test"}],
+        }
+        write_json(paths.analysis_dir / "keyframes.json", payload)
+        return payload
+
+    def fake_visual(keyframes, language, paths, use_ocr=True):
+        payload = {"frames": [_visual_frame(frame_path)], "warnings": []}
+        write_json(paths.analysis_dir / "visual-analysis.json", payload)
+        return payload
+
+    monkeypatch.setattr(pipeline, "ingest_video", fake_ingest)
+    monkeypatch.setattr(pipeline, "build_transcript", fake_transcript)
+    monkeypatch.setattr(pipeline, "extract_keyframes", fake_keyframes)
+    monkeypatch.setattr(pipeline, "analyze_visuals", fake_visual)
+    monkeypatch.setattr(
+        pipeline,
+        "build_content_assets",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            PipelineError("llm_contract_invalid", "LLM returned invalid content assets.", "planning_content")
+        ),
+    )
+
+    pipeline.run_project_analysis_pipeline(record.project_id)
+
+    updated = test_store.get(record.project_id)
+    assert updated.status == "failed"
+    assert updated.error["code"] == "llm_contract_invalid"
+    assert "download used fallback" in updated.warnings
+    assert "content_assets" not in updated.outputs
+    assert not (paths.analysis_dir / "content-assets.json").exists()
 
 
 def test_produce_pipeline_requires_llm_and_does_not_fake_outputs(tmp_path: Path, monkeypatch):

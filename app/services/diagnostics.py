@@ -137,6 +137,8 @@ def collect_diagnostics() -> Dict[str, Any]:
         "max_chars": settings.llm_max_chars,
         "max_tokens": settings.llm_max_tokens,
         "api_key_env": "configured" if settings.llm_api_key else "missing",
+        "readiness_check": "configuration_only",
+        "self_test_endpoint": "/api/llm/self-test",
     }
     image = {
         "enabled": settings.image_enabled,
@@ -148,6 +150,8 @@ def collect_diagnostics() -> Dict[str, Any]:
         "timeout_ms": settings.image_timeout_ms,
         "api_key_env": "configured" if settings.image_api_key else "missing",
         "fallback_renderer": "pillow_template_v1",
+        "readiness_check": "configuration_only",
+        "self_test_endpoint": "/api/image/self-test",
     }
     ocr = {
         "configured_provider": settings.ocr_provider,

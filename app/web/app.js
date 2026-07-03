@@ -726,7 +726,7 @@ function renderCreateJobPanel() {
   const produceReady = canProduceArticle || canGenerateImages;
   const produceLabel = canGenerateImages ? "继续生成图片卡片" : "一键产出图文";
   const llmNote = llmReady
-    ? `LLM 已可用于${route.label}稿生成；图片卡片通过独立生图 API 渲染。`
+    ? `LLM 已配置，可在“LLM 配置”页自检连通性；${route.label}稿生成依赖实时接口稳定性。`
     : "LLM 未配置：可分析解析；文章生成不能伪造，已生成文章后仍可单独调用生图 API。";
   return `
     <section class="panel workbench-control-card">

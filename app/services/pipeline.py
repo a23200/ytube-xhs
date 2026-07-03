@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from app.schemas.models import ProjectStatus
-from app.services.content_planner import build_content_assets
+from app.services.content_planner import build_basic_content_assets, build_content_assets
 from app.services.errors import PipelineError
 from app.services.frame_extractor import extract_keyframes
 from app.services.image_card_renderer import render_image_cards
@@ -36,6 +36,17 @@ TOUTIAO_PRODUCE_OUTPUT_KINDS = [
 ]
 TOUTIAO_IMAGE_GENERATION_OUTPUT_KINDS = ["toutiao_image_cards", "asset_package"]
 VISUAL_AND_DOWNSTREAM_OUTPUT_KINDS = ["visual_analysis", *DOWNSTREAM_OUTPUT_KINDS]
+ANALYZE_LLM_FALLBACK_CODES = {"llm_unavailable", "missing_dependency", "llm_request_failed", "llm_json_parse_failed"}
+
+
+def _record_ingest_warnings(project_id: str, metadata: Dict[str, Any]) -> None:
+    for warning in metadata.get("ingest_warnings", []) or []:
+        if warning:
+            store.add_warning(project_id, str(warning))
+
+
+def _can_use_basic_analysis_fallback(error: PipelineError) -> bool:
+    return error.step == "planning_content" and error.code in ANALYZE_LLM_FALLBACK_CODES
 
 
 def _register_standard_outputs(project_id: str) -> None:
@@ -169,6 +180,7 @@ def run_project_pipeline(project_id: str) -> None:
     try:
         store.set_status(project_id, ProjectStatus.ingesting, "Fetching video metadata, media, subtitles, and thumbnail.")
         metadata = ingest_video(record.url, record.language, paths)
+        _record_ingest_warnings(project_id, metadata)
         store.add_output(project_id, "metadata", paths.source_dir / "metadata.json")
         store.log(project_id, ProjectStatus.ingesting, "Ingest completed.", {"title": metadata.get("title")})
 
@@ -363,6 +375,7 @@ def run_project_analysis_pipeline(project_id: str) -> None:
     try:
         store.set_status(project_id, ProjectStatus.ingesting, "Fetching video metadata, media, subtitles, and thumbnail.")
         metadata = ingest_video(record.url, record.language, paths)
+        _record_ingest_warnings(project_id, metadata)
         store.add_output(project_id, "metadata", paths.source_dir / "metadata.json")
         store.log(project_id, ProjectStatus.ingesting, "Ingest completed.", {"title": metadata.get("title")})
 
@@ -396,7 +409,30 @@ def run_project_analysis_pipeline(project_id: str) -> None:
         )
 
         store.set_status(project_id, ProjectStatus.planning_content, "Generating structured content assets with LLM.")
-        assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
+        try:
+            assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
+        except PipelineError as exc:
+            if not _can_use_basic_analysis_fallback(exc):
+                raise
+            store.add_warning(
+                project_id,
+                (
+                    "LLM content planning failed during Analyze, so the system generated a conservative local "
+                    "basic analysis from real transcript, keyframe, and OCR artifacts. Produce still requires a "
+                    "working LLM."
+                ),
+            )
+            store.log(project_id, ProjectStatus.planning_content, "LLM planning failed; using local basic analysis fallback.", exc.to_dict())
+            assets = build_basic_content_assets(
+                metadata,
+                transcript,
+                keyframes,
+                visual,
+                record.language,
+                record.style,
+                paths,
+                fallback_reason=exc.message,
+            )
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         write_analysis_asset_package(metadata, transcript, keyframes, visual, assets, paths, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
