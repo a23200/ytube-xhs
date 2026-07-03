@@ -13,7 +13,6 @@ LAUNCHD_MODE="daemon"
 INSTALL_WHISPER=1
 INSTALL_PADDLEOCR=0
 INSTALL_BREW_PACKAGES=1
-INSTALL_HOMEBREW=1
 
 usage() {
   cat <<'EOF'
@@ -28,7 +27,7 @@ Options:
   --no-whisper            Do not install faster-whisper
   --with-paddleocr        Install PaddleOCR Python package; PaddlePaddle runtime may still be required
   --skip-brew             Do not install Homebrew packages
-  --skip-homebrew-install Do not try to install Homebrew when it is missing
+  --skip-homebrew-install Accepted for bootstrap compatibility; Homebrew install happens before sudo
   -h, --help              Show help
 
 Recommended production command:
@@ -75,7 +74,6 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --skip-homebrew-install)
-      INSTALL_HOMEBREW=0
       shift
       ;;
     -h|--help)
@@ -122,45 +120,17 @@ brew_path() {
     command -v brew
     return 0
   fi
+  if [ -x /opt/homebrew/bin/brew ]; then
+    echo /opt/homebrew/bin/brew
+    return 0
+  fi
+  if [ -x /usr/local/bin/brew ]; then
+    echo /usr/local/bin/brew
+    return 0
+  fi
   if [ "$SERVICE_USER" != "root" ]; then
     sudo -u "$SERVICE_USER" /bin/zsh -lc 'command -v brew' 2>/dev/null || true
   fi
-}
-
-install_homebrew_if_missing() {
-  local existing
-  existing="$(brew_path)"
-  if [ -n "$existing" ]; then
-    echo "$existing"
-    return 0
-  fi
-  if [ "$INSTALL_HOMEBREW" -ne 1 ]; then
-    return 0
-  fi
-  if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required to install Homebrew automatically." >&2
-    return 0
-  fi
-
-  local prefix
-  if [ "$(uname -m)" = "arm64" ]; then
-    prefix="/opt/homebrew"
-  else
-    prefix="/usr/local"
-  fi
-
-  echo "Homebrew not found. Attempting non-interactive Homebrew install for ${SERVICE_USER}..." >&2
-  if [ "$(id -u)" -eq 0 ]; then
-    mkdir -p "$prefix"
-    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$prefix" 2>/dev/null || true
-    sudo -u "$SERVICE_USER" env NONINTERACTIVE=1 CI=1 /bin/bash -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  else
-    env NONINTERACTIVE=1 CI=1 /bin/bash -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  fi
-
-  brew_path
 }
 
 install_brew_package() {
@@ -206,9 +176,9 @@ mkdir -p "$APP_DIR/runtime/logs" "$APP_DIR/secrets"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR"
 
 if [ "$INSTALL_BREW_PACKAGES" -eq 1 ]; then
-  BREW_BIN="$(install_homebrew_if_missing)"
+  BREW_BIN="$(brew_path)"
   if [ -z "$BREW_BIN" ]; then
-    echo "Homebrew not found. Install ffmpeg and tesseract manually, or install Homebrew and re-run." >&2
+    echo "Homebrew not found. Install Homebrew first, or re-run the GitHub bootstrap installer without --skip-homebrew-install." >&2
   else
     install_brew_package ffmpeg "$BREW_BIN"
     install_brew_package tesseract "$BREW_BIN"

@@ -38,7 +38,7 @@ Options:
   -h, --help             Show help
 
 Remote one-liner example:
-  YTXHS_REF=macmini-v20260704.3 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.3/install-from-github-macos.sh)"
+  YTXHS_REF=macmini-v20260704.4 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.4/install-from-github-macos.sh)"
 
 Private repository fallback:
   If this repository is private again later, set GH_TOKEN or authenticate gh CLI
@@ -120,6 +120,66 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required." >&2
   exit 1
 fi
+
+brew_path() {
+  if command -v brew >/dev/null 2>&1; then
+    command -v brew
+    return 0
+  fi
+  if [ -x /opt/homebrew/bin/brew ]; then
+    echo /opt/homebrew/bin/brew
+    return 0
+  fi
+  if [ -x /usr/local/bin/brew ]; then
+    echo /usr/local/bin/brew
+    return 0
+  fi
+  return 0
+}
+
+ensure_homebrew_before_sudo() {
+  if [ "$SKIP_BREW" = "1" ]; then
+    return 0
+  fi
+
+  local existing
+  existing="$(brew_path)"
+  if [ -n "$existing" ]; then
+    echo "Homebrew found: $existing"
+    return 0
+  fi
+
+  if [ "$SKIP_HOMEBREW_INSTALL" = "1" ]; then
+    echo "Homebrew is not installed and --skip-homebrew-install was passed." >&2
+    return 0
+  fi
+
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "Homebrew auto-install should run as the normal admin user, not root." >&2
+    echo "Install Homebrew manually, then re-run this installer." >&2
+    exit 1
+  fi
+
+  echo "Homebrew not found. Installing Homebrew as current user before sudo deployment..."
+  echo "Homebrew may ask for your macOS password."
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+  if [ "$(uname -m)" = "arm64" ]; then
+    export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+  else
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+  fi
+
+  existing="$(brew_path)"
+  if [ -z "$existing" ]; then
+    echo "Homebrew installation finished but brew is still not on PATH." >&2
+    echo "Open a new terminal or add Homebrew to PATH, then re-run this installer." >&2
+    exit 1
+  fi
+  echo "Homebrew installed: $existing"
+}
+
+ensure_homebrew_before_sudo
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ytube-xhs-install.XXXXXX")"
 ARCHIVE="$WORK_DIR/source.tar.gz"
