@@ -179,7 +179,7 @@ API 文档：
 从 GitHub 公开仓库一键安装：
 
 ```bash
-YTXHS_REF=macmini-v20260704.4 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.4/install-from-github-macos.sh)"
+YTXHS_REF=macmini-v20260704.5 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.5/install-from-github-macos.sh)"
 ```
 
 或者生成离线部署包：
@@ -195,6 +195,14 @@ sudo deploy/macos/install_macos.sh --app-dir /opt/ytube-xhs --port 8012 --servic
 ```
 
 完整步骤见 [`docs/mac-mini-deployment.md`](docs/mac-mini-deployment.md)。生产默认建议端口为 `8012`，开发示例仍使用 `8000`。
+
+安装后常用启动/自检：
+
+```bash
+/opt/ytube-xhs/start.sh
+/opt/ytube-xhs/start.sh restart
+/opt/ytube-xhs/start.sh status
+```
 
 终端同步运行一个真实任务：
 

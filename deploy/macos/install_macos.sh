@@ -174,6 +174,7 @@ fi
 
 mkdir -p "$APP_DIR/runtime/logs" "$APP_DIR/secrets"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR"
+chmod +x "$APP_DIR/start.sh" "$APP_DIR/deploy/macos/"*.sh "$APP_DIR/scripts/"*.sh 2>/dev/null || true
 
 if [ "$INSTALL_BREW_PACKAGES" -eq 1 ]; then
   BREW_BIN="$(brew_path)"
@@ -276,6 +277,8 @@ fi
 echo
 echo "Install complete."
 echo "Open:    http://<mac-mini-ip>:${PORT}"
+echo "Start:   $APP_DIR/start.sh"
+echo "Restart: $APP_DIR/start.sh restart"
 echo "Manage:  $APP_DIR/deploy/macos/manage.sh status"
 echo "Logs:    $APP_DIR/deploy/macos/manage.sh logs"
 echo "Health:  YTXHS_PORT=${PORT} $APP_DIR/deploy/macos/healthcheck.sh --llm"

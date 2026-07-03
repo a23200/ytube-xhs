@@ -38,6 +38,28 @@ launchctl_cmd() {
   fi
 }
 
+plist_path() {
+  if [ "$DOMAIN" = "system" ]; then
+    echo "/Library/LaunchDaemons/${LABEL}.plist"
+  else
+    echo "$HOME/Library/LaunchAgents/${LABEL}.plist"
+  fi
+}
+
+ensure_loaded() {
+  if launchctl_cmd print "${DOMAIN}/${LABEL}" >/dev/null 2>&1; then
+    return 0
+  fi
+  local plist
+  plist="$(plist_path)"
+  if [ ! -f "$plist" ]; then
+    echo "Service is not loaded and plist does not exist: $plist" >&2
+    return 1
+  fi
+  launchctl_cmd bootstrap "$DOMAIN" "$plist" 2>/dev/null || true
+  launchctl_cmd enable "${DOMAIN}/${LABEL}" 2>/dev/null || true
+}
+
 cd "$APP_DIR"
 
 cmd="${1:-}"
@@ -49,6 +71,7 @@ case "$cmd" in
     }
     ;;
   start|restart)
+    ensure_loaded
     launchctl_cmd kickstart -k "${DOMAIN}/${LABEL}"
     ;;
   stop)
