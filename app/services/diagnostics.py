@@ -1,17 +1,18 @@
 import importlib
 import importlib.metadata
 import importlib.util
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from app.services.config import settings
 from app.services.llm_client import sanitize_llm_url
+from app.services.media_utils import command_env, find_command
 
 
 def _command_version(command: str) -> Optional[str]:
-    version_flag = "--version" if command == "tesseract" else "-version"
+    command_name = Path(command).name
+    version_flag = "--version" if command_name == "tesseract" else "-version"
     try:
         result = subprocess.run(
             [command, version_flag],
@@ -19,6 +20,7 @@ def _command_version(command: str) -> Optional[str]:
             capture_output=True,
             text=True,
             timeout=5,
+            env=command_env(),
         )
     except Exception:
         return None
@@ -29,11 +31,11 @@ def _command_version(command: str) -> Optional[str]:
 
 
 def _command_status(command: str) -> Dict[str, Any]:
-    path = shutil.which(command)
+    path = find_command(command)
     return {
         "available": bool(path),
         "path": path,
-        "version": _command_version(command) if path else None,
+        "version": _command_version(path) if path else None,
     }
 
 
@@ -47,6 +49,7 @@ def _tesseract_language_status(command_path: Optional[str]) -> Dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=5,
+            env=command_env(),
         )
     except Exception as exc:
         return {"available": False, "languages": [], "key_languages": {}, "error": f"{type(exc).__name__}: {exc}"}

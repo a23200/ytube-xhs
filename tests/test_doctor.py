@@ -5,7 +5,7 @@ from scripts import doctor
 def test_tesseract_version_uses_double_dash_flag(monkeypatch):
     calls = []
 
-    def fake_run(command, check, capture_output, text, timeout):
+    def fake_run(command, check, capture_output, text, timeout, **kwargs):
         calls.append(command)
 
         class Result:
@@ -23,7 +23,7 @@ def test_tesseract_version_uses_double_dash_flag(monkeypatch):
 def test_ffmpeg_version_uses_single_dash_flag(monkeypatch):
     calls = []
 
-    def fake_run(command, check, capture_output, text, timeout):
+    def fake_run(command, check, capture_output, text, timeout, **kwargs):
         calls.append(command)
 
         class Result:
@@ -39,7 +39,7 @@ def test_ffmpeg_version_uses_single_dash_flag(monkeypatch):
 
 
 def test_tesseract_language_status_reports_key_languages(monkeypatch):
-    def fake_run(command, check, capture_output, text, timeout):
+    def fake_run(command, check, capture_output, text, timeout, **kwargs):
         assert command == ["/usr/bin/tesseract", "--list-langs"]
 
         class Result:

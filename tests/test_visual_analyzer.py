@@ -71,7 +71,7 @@ def test_visual_analyzer_writes_skipped_payload_when_keyframes_skipped(tmp_path:
 
 def test_visual_analyzer_reports_unavailable_tesseract(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(visual_analyzer.settings, "ocr_provider", "tesseract")
-    monkeypatch.setattr(visual_analyzer.shutil, "which", lambda command: None)
+    monkeypatch.setattr(visual_analyzer, "find_command", lambda command: None)
     paths = ProjectPaths(tmp_path / "project")
     paths.ensure()
     frame_path = paths.frames_dir / "frame_0001.jpg"
@@ -88,9 +88,9 @@ def test_visual_analyzer_reports_unavailable_tesseract(tmp_path: Path, monkeypat
 
 
 def test_tesseract_provider_falls_back_to_english_when_chinese_data_missing(monkeypatch):
-    monkeypatch.setattr(visual_analyzer.shutil, "which", lambda command: "/usr/bin/tesseract")
+    monkeypatch.setattr(visual_analyzer, "find_command", lambda command: "/usr/bin/tesseract")
 
-    def fake_run(command, capture_output, text, timeout, check):
+    def fake_run(command, capture_output, text, timeout, check, **kwargs):
         assert command == ["/usr/bin/tesseract", "--list-langs"]
 
         class Result:
@@ -110,9 +110,9 @@ def test_tesseract_provider_falls_back_to_english_when_chinese_data_missing(monk
 
 
 def test_tesseract_provider_reports_missing_language_data(monkeypatch):
-    monkeypatch.setattr(visual_analyzer.shutil, "which", lambda command: "/usr/bin/tesseract")
+    monkeypatch.setattr(visual_analyzer, "find_command", lambda command: "/usr/bin/tesseract")
 
-    def fake_run(command, capture_output, text, timeout, check):
+    def fake_run(command, capture_output, text, timeout, check, **kwargs):
         assert command == ["/usr/bin/tesseract", "--list-langs"]
 
         class Result:

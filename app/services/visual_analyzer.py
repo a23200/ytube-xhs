@@ -1,5 +1,4 @@
 import re
-import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -7,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.services.config import settings
 from app.services.errors import PipelineError
+from app.services.media_utils import command_env, find_command
 from app.services.runtime_store import ProjectPaths, write_json
 
 FRAME_FILENAME_RE = re.compile(r"^frame_\d{4}\.jpg$")
@@ -88,7 +88,7 @@ class TesseractOCRProvider(OCRProvider):
     def __init__(self, language: str) -> None:
         self.requested_language = "chi_sim+eng" if language.startswith("zh") else "eng"
         self.language = self.requested_language
-        self._command = shutil.which("tesseract")
+        self._command = find_command("tesseract")
         self._error = "" if self._command else "tesseract command is not available."
         self._warning = ""
         if self._command:
@@ -104,6 +104,7 @@ class TesseractOCRProvider(OCRProvider):
                 text=True,
                 timeout=5,
                 check=False,
+                env=command_env(),
             )
         except Exception as exc:
             self._error = f"Could not list tesseract languages: {exc}"
@@ -166,6 +167,7 @@ class TesseractOCRProvider(OCRProvider):
                 text=True,
                 timeout=45,
                 check=False,
+                env=command_env(),
             )
         except Exception as exc:
             return {"ocr_text": "", "confidence": 0.0, "error": f"Tesseract failed: {exc}"}
