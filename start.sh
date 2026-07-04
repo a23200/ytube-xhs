@@ -15,6 +15,7 @@ Usage: ./start.sh [command]
 
 Commands:
   start     Check service; start it if unhealthy. Default.
+  open      Check/start service, then open the project URL in the default browser.
   restart   Force restart service and wait until healthy.
   status    Print service status and access URLs.
   health    Run HTTP healthcheck only.
@@ -88,6 +89,18 @@ case "$cmd" in
     echo "服务未通过健康检查，正在启动/拉起 launchd 服务..."
     sudo "$MANAGE" start
     wait_for_health
+    ;;
+  open)
+    if health_ok; then
+      echo "服务已正常运行。"
+      print_urls
+    else
+      echo "服务未通过健康检查，正在启动/拉起 launchd 服务..."
+      sudo "$MANAGE" start
+      wait_for_health
+    fi
+    echo "正在打开浏览器：${BASE_URL}"
+    open "$BASE_URL" >/dev/null 2>&1 || true
     ;;
   restart)
     echo "正在重启服务..."

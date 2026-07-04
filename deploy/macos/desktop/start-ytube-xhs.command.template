@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="__APP_DIR__"
+PORT="__PORT__"
+BASE_URL="${YTXHS_BASE_URL:-http://127.0.0.1:${PORT}}"
+START_SCRIPT="$APP_DIR/start.sh"
+
+cd "$HOME"
+clear 2>/dev/null || true
+
+echo "启动 ytube-xhs..."
+echo "应用目录: $APP_DIR"
+echo "访问地址: $BASE_URL"
+echo
+
+if [ ! -x "$START_SCRIPT" ]; then
+  echo "找不到启动脚本: $START_SCRIPT" >&2
+  echo "请先安装 ytube-xhs，或检查 APP_DIR。" >&2
+  echo
+  read -r -p "按回车关闭窗口..." _ || true
+  exit 1
+fi
+
+if "$START_SCRIPT" open; then
+  echo
+  echo "已打开浏览器。如果没有自动打开，请手动访问："
+  echo "  $BASE_URL"
+else
+  rc=$?
+  echo
+  echo "服务启动失败，退出码: $rc" >&2
+  echo "可查看日志：" >&2
+  echo "  $APP_DIR/deploy/macos/manage.sh logs" >&2
+  echo
+  read -r -p "按回车关闭窗口..." _ || true
+  exit "$rc"
+fi
+
+# 双击 .command 时保留窗口几秒，方便看到地址。
+sleep 3

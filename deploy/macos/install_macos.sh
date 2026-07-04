@@ -237,6 +237,42 @@ launchctl_enable_and_start_or_diagnose() {
   fi
 }
 
+install_desktop_launcher() {
+  if [ "$SERVICE_USER" = "root" ]; then
+    echo "Skipping desktop launcher for root service user."
+    return 0
+  fi
+
+  local user_home desktop_dir template launcher
+  user_home="$(dscl . -read "/Users/${SERVICE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+  if [ -z "$user_home" ] || [ ! -d "$user_home" ]; then
+    echo "Could not determine home directory for $SERVICE_USER; skipping desktop launcher." >&2
+    return 0
+  fi
+
+  desktop_dir="$user_home/Desktop"
+  template="$APP_DIR/deploy/macos/desktop/start-ytube-xhs.command.template"
+  launcher="$desktop_dir/启动 ytube-xhs.command"
+  if [ ! -f "$template" ]; then
+    echo "Desktop launcher template is missing: $template" >&2
+    return 0
+  fi
+
+  mkdir -p "$desktop_dir"
+  python3 - "$template" "$launcher" "$APP_DIR" "$PORT" <<'PY'
+import sys
+
+template_path, output_path, app_dir, port = sys.argv[1:5]
+text = open(template_path, "r", encoding="utf-8").read()
+text = text.replace("__APP_DIR__", app_dir)
+text = text.replace("__PORT__", port)
+open(output_path, "w", encoding="utf-8").write(text)
+PY
+  chown "$SERVICE_USER:$SERVICE_GROUP" "$launcher"
+  chmod 755 "$launcher"
+  echo "Desktop launcher: $launcher"
+}
+
 echo "Installing ytube-xhs"
 echo "  source:       $SOURCE_DIR"
 echo "  app dir:      $APP_DIR"
@@ -362,9 +398,12 @@ PY
   fi
 fi
 
+install_desktop_launcher
+
 echo
 echo "Install complete."
 echo "Open:    http://<mac-mini-ip>:${PORT}"
+echo "Desktop: ~/Desktop/启动 ytube-xhs.command"
 echo "Start:   $APP_DIR/start.sh"
 echo "Restart: $APP_DIR/start.sh restart"
 echo "Manage:  $APP_DIR/deploy/macos/manage.sh status"
