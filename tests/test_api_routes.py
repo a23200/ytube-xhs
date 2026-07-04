@@ -1263,6 +1263,63 @@ def test_project_routes_return_404_for_invalid_project_id(tmp_path, monkeypatch)
     assert rerun_visuals.json()["detail"] == "Project not found"
 
 
+def test_cancel_project_endpoint_marks_running_project_failed(tmp_path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(routes, "store", test_store)
+    monkeypatch.setattr(routes, "run_project_pipeline", lambda project_id: None)
+    client = TestClient(app)
+
+    create = client.post(
+        "/api/projects",
+        json={
+            "url": "https://example.com/video",
+            "language": "zh",
+            "style": "干货",
+            "use_whisper": True,
+            "max_frames": 8,
+        },
+    )
+    project_id = create.json()["project_id"]
+    test_store.set_status(project_id, ProjectStatus.ingesting, "started")
+
+    response = client.post(f"/api/projects/{project_id}/cancel")
+    status = client.get(f"/api/projects/{project_id}/status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cancelled"] is True
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "user_stopped"
+    assert status.json()["can_cancel"] is False
+    assert test_store.get(project_id).status == ProjectStatus.failed
+
+
+def test_cancel_project_endpoint_noops_when_not_running(tmp_path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(routes, "store", test_store)
+    monkeypatch.setattr(routes, "run_project_pipeline", lambda project_id: None)
+    client = TestClient(app)
+
+    create = client.post(
+        "/api/projects",
+        json={
+            "url": "https://example.com/video",
+            "language": "zh",
+            "style": "干货",
+            "use_whisper": True,
+            "max_frames": 8,
+        },
+    )
+    project_id = create.json()["project_id"]
+    test_store.set_status(project_id, ProjectStatus.analysis_completed, "done")
+
+    response = client.post(f"/api/projects/{project_id}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["cancelled"] is False
+    assert response.json()["status"] == "analysis_completed"
+
+
 def test_rerun_downstream_endpoint_queues_existing_project(tmp_path, monkeypatch):
     test_store = ProjectStore(tmp_path)
     monkeypatch.setattr(routes, "store", test_store)

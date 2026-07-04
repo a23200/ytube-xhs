@@ -126,6 +126,10 @@ def _can_use_basic_analysis_fallback(error: PipelineError) -> bool:
     return error.step == "planning_content" and error.code in ANALYZE_LLM_FALLBACK_CODES
 
 
+def _pipeline_cancelled(project_id: str) -> bool:
+    return store.cancel_requested(project_id)
+
+
 def _register_standard_outputs(project_id: str) -> None:
     paths = store.paths(project_id)
     output_paths = {
@@ -305,6 +309,8 @@ def run_project_pipeline(project_id: str) -> None:
         _register_standard_outputs(project_id)
         store.set_status(project_id, ProjectStatus.completed, "Pipeline completed.")
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -315,6 +321,8 @@ def run_project_pipeline(project_id: str) -> None:
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)
@@ -375,6 +383,8 @@ def run_project_downstream_pipeline(project_id: str) -> None:
         else:
             store.set_status(project_id, ProjectStatus.completed, "Downstream rerun completed.")
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -385,6 +395,8 @@ def run_project_downstream_pipeline(project_id: str) -> None:
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)
@@ -452,6 +464,8 @@ def run_project_visual_pipeline(project_id: str) -> None:
         else:
             store.set_status(project_id, ProjectStatus.completed, "Visual and downstream rerun completed.")
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -462,6 +476,8 @@ def run_project_visual_pipeline(project_id: str) -> None:
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)
@@ -528,6 +544,8 @@ def run_project_analysis_pipeline(project_id: str) -> None:
         )
         store.set_status(project_id, ProjectStatus.analysis_completed, completion_message)
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -538,6 +556,8 @@ def run_project_analysis_pipeline(project_id: str) -> None:
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)
@@ -589,6 +609,8 @@ def run_project_produce_pipeline(project_id: str) -> None:
         else:
             store.set_status(project_id, ProjectStatus.xhs_completed, "XHS article completed. Image generation can be run next.")
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -599,6 +621,8 @@ def run_project_produce_pipeline(project_id: str) -> None:
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)
@@ -650,6 +674,8 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
         else:
             store.set_status(project_id, ProjectStatus.toutiao_completed, "Toutiao article completed. Image generation can be run next.")
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -660,6 +686,8 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__, "platform": "toutiao"},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)
@@ -713,6 +741,8 @@ def run_project_image_generation_pipeline(project_id: str, style: str = "clean")
         _register_standard_outputs(project_id)
         store.set_status(project_id, ProjectStatus.completed, "Image generation completed. XHS article and image cards are ready.")
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -723,6 +753,8 @@ def run_project_image_generation_pipeline(project_id: str, style: str = "clean")
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)
@@ -787,6 +819,8 @@ def run_project_toutiao_image_generation_pipeline(project_id: str, style: str = 
         _register_standard_outputs(project_id)
         store.set_status(project_id, ProjectStatus.completed, "Image generation completed. Toutiao article and image cards are ready.")
     except PipelineError as exc:
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, exc.to_dict())
@@ -797,6 +831,8 @@ def run_project_toutiao_image_generation_pipeline(project_id: str, style: str = 
             "step": store.get(project_id).status,
             "details": {"type": type(exc).__name__, "platform": "toutiao"},
         }
+        if _pipeline_cancelled(project_id):
+            return
         write_partial_asset_package(paths, error, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         store.fail(project_id, error)

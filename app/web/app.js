@@ -1459,8 +1459,10 @@ async function renderProjectDetail(projectId) {
 
 function renderDetailActions(detail) {
   const projectId = detail.projectId;
+  const canCancel = Boolean(detail.status?.can_cancel || isRunning(detail.status?.status));
   return `
     <button class="ghost-button" data-action="verify-project" data-project-id="${projectId}" type="button">校验</button>
+    <button class="danger-button" data-action="cancel-project" data-project-id="${projectId}" ${canCancel ? "" : "disabled"} type="button">强制停止</button>
     <button class="ghost-button" data-action="rerun-visuals" data-project-id="${projectId}" ${detail.status.can_rerun_visuals ? "" : "disabled"} type="button">重跑视觉</button>
     <button class="ghost-button" data-action="rerun-downstream" data-project-id="${projectId}" ${detail.status.can_rerun_downstream ? "" : "disabled"} type="button">重跑文案</button>
     <a class="button" href="/api/projects/${projectId}/download">下载 ZIP</a>
@@ -2324,6 +2326,18 @@ async function deleteProject(projectId) {
   }
 }
 
+async function cancelProject(projectId) {
+  if (!window.confirm("确定要强制停止这个任务吗？已生成的中间产物会保留。")) return;
+  try {
+    await apiPost(`/api/projects/${projectId}/cancel`);
+    toast("已发送强制停止，任务状态已释放");
+    state.pendingImageGenerationProjectId = null;
+    await renderRoute();
+  } catch (error) {
+    toast(errorText(error));
+  }
+}
+
 async function rerunProject(projectId, scope) {
   const endpoint = scope === "visuals" ? "visuals" : "downstream";
   try {
@@ -2473,6 +2487,7 @@ document.addEventListener("click", async (event) => {
     if (target) await copyText(target.textContent || "");
   }
   if (action === "delete-project") await deleteProject(actionNode.dataset.projectId);
+  if (action === "cancel-project") await cancelProject(actionNode.dataset.projectId);
   if (action === "rerun-visuals") await rerunProject(actionNode.dataset.projectId, "visuals");
   if (action === "rerun-downstream") await rerunProject(actionNode.dataset.projectId, "downstream");
   if (action === "verify-project") await verifyProject(actionNode.dataset.projectId);

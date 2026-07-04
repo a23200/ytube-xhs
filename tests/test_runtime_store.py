@@ -207,6 +207,66 @@ def test_project_store_try_start_visual_rerun_only_needs_pre_visual_artifacts(tm
     assert store.can_start_visual_rerun(record.project_id) is False
 
 
+def test_project_store_cancel_running_project_releases_status_and_blocks_late_writes(tmp_path: Path):
+    store = ProjectStore(tmp_path)
+    record = store.create(
+        ProjectCreate(
+            url="https://example.com/video",
+            language="zh",
+            style="干货",
+            use_whisper=True,
+            max_frames=8,
+        )
+    )
+    paths = store.paths(record.project_id)
+    store.set_status(record.project_id, ProjectStatus.ingesting, "started")
+
+    cancelled = store.cancel(record.project_id)
+
+    assert cancelled.status == ProjectStatus.failed
+    assert cancelled.error["code"] == "user_stopped"
+    assert cancelled.error["details"]["previous_status"] == "ingesting"
+    assert paths.cancel_file().exists()
+    assert store.can_cancel(record.project_id) is False
+
+    late = store.set_status(record.project_id, ProjectStatus.transcribing, "late write")
+    assert late.status == ProjectStatus.failed
+    assert late.error["code"] == "user_stopped"
+
+    write_json(paths.source_dir / "metadata.json", {"video_id": "v1"})
+    store.add_output(record.project_id, "metadata", paths.source_dir / "metadata.json")
+    assert "metadata" not in store.get(record.project_id).outputs
+
+
+def test_project_store_retry_clears_cancel_marker_when_inputs_ready(tmp_path: Path):
+    store = ProjectStore(tmp_path)
+    record = store.create(
+        ProjectCreate(
+            url="https://example.com/video",
+            language="zh",
+            style="干货",
+            use_whisper=True,
+            max_frames=8,
+        )
+    )
+    paths = store.paths(record.project_id)
+    _write_registered_upstream(store, record.project_id)
+    write_json(paths.analysis_dir / "content-assets.json", {"ok": True})
+    store.add_output(record.project_id, "content_assets", paths.analysis_dir / "content-assets.json")
+
+    store.set_status(record.project_id, ProjectStatus.producing_article, "started")
+    store.cancel(record.project_id)
+    assert paths.cancel_file().exists()
+
+    started, queued, missing = store.try_start_produce(record.project_id)
+
+    assert started is True
+    assert missing == []
+    assert queued.status == ProjectStatus.producing_article
+    assert queued.error is None
+    assert not paths.cancel_file().exists()
+
+
 def test_project_store_marks_stale_running_projects_failed(tmp_path: Path):
     store = ProjectStore(tmp_path)
     running = store.create(

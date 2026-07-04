@@ -11,6 +11,7 @@ from app.schemas.models import FILE_KIND_TO_PATH, ProgressLog, ProjectCreate, Pr
 from app.services.config import settings
 
 PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+CANCEL_REQUEST_FILENAME = ".cancel-requested.json"
 RERUN_READY_STATUSES = {ProjectStatus.failed, ProjectStatus.completed}
 PRODUCE_READY_STATUSES = {
     ProjectStatus.analysis_completed,
@@ -106,6 +107,9 @@ class ProjectPaths:
 
     def run_metadata_file(self) -> Path:
         return self.analysis_dir / "run-metadata.json"
+
+    def cancel_file(self) -> Path:
+        return self.project_dir / CANCEL_REQUEST_FILENAME
 
     def file_for_kind(self, kind: str) -> Path:
         if kind not in FILE_KIND_TO_PATH:
@@ -239,6 +243,48 @@ class ProjectStore:
         record = self.get(project_id)
         return record.status in RERUN_READY_STATUSES and not self._missing_visual_inputs(self.paths(project_id), record)
 
+    def can_cancel(self, project_id: str) -> bool:
+        return self.get(project_id).status in RUNNING_STATUSES
+
+    def cancel_requested(self, project_id: str) -> bool:
+        return self.paths(project_id).cancel_file().exists()
+
+    def _clear_cancel_requested(self, paths: ProjectPaths) -> None:
+        paths.cancel_file().unlink(missing_ok=True)
+
+    def cancel(self, project_id: str) -> ProjectRecord:
+        with self._lock:
+            paths = self.paths(project_id)
+            record = ProjectRecord(**read_json(paths.status_file()))
+            if record.status not in RUNNING_STATUSES:
+                return record
+            previous_status = record.status.value
+            now = utc_now()
+            error = {
+                "code": "user_stopped",
+                "message": "Project was force-stopped by the user. You can inspect existing artifacts or start a new task.",
+                "step": previous_status,
+                "details": {
+                    "previous_status": previous_status,
+                    "stopped_at": now,
+                },
+            }
+            write_json(paths.cancel_file(), error)
+            record.status = ProjectStatus.failed
+            record.error = error
+            record.updated_at = now
+            record.logs.append(
+                ProgressLog(
+                    time=now,
+                    status=ProjectStatus.failed,
+                    message=error["message"],
+                    details=error,
+                )
+            )
+            self._write_record(paths, record)
+            self._write_run_metadata(paths, record)
+            return record
+
     def try_start_downstream_rerun(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
         with self._lock:
             paths = self.paths(project_id)
@@ -248,6 +294,7 @@ class ProjectStore:
             missing_inputs = self._missing_downstream_inputs(paths, record)
             if missing_inputs:
                 return False, record, missing_inputs
+            self._clear_cancel_requested(paths)
             record.status = ProjectStatus.planning_content
             record.error = None
             record.updated_at = utc_now()
@@ -272,6 +319,7 @@ class ProjectStore:
             missing_inputs = self._missing_produce_inputs(paths, record)
             if missing_inputs:
                 return False, record, missing_inputs
+            self._clear_cancel_requested(paths)
             record.status = ProjectStatus.producing_article
             record.error = None
             record.updated_at = utc_now()
@@ -296,6 +344,7 @@ class ProjectStore:
             missing_inputs = self._missing_produce_inputs(paths, record)
             if missing_inputs:
                 return False, record, missing_inputs
+            self._clear_cancel_requested(paths)
             record.status = ProjectStatus.producing_article
             record.error = None
             record.updated_at = utc_now()
@@ -322,6 +371,7 @@ class ProjectStore:
             missing_inputs = self._missing_image_generation_inputs(paths, record)
             if missing_inputs:
                 return False, record, missing_inputs
+            self._clear_cancel_requested(paths)
             record.status = ProjectStatus.rendering_cards
             record.error = None
             record.updated_at = utc_now()
@@ -348,6 +398,7 @@ class ProjectStore:
             missing_inputs = self._missing_platform_image_generation_inputs(paths, record, platform)
             if missing_inputs:
                 return False, record, missing_inputs
+            self._clear_cancel_requested(paths)
             record.status = ProjectStatus.rendering_cards
             record.error = None
             record.updated_at = utc_now()
@@ -372,6 +423,7 @@ class ProjectStore:
             missing_inputs = self._missing_visual_inputs(paths, record)
             if missing_inputs:
                 return False, record, missing_inputs
+            self._clear_cancel_requested(paths)
             record.status = ProjectStatus.analyzing_visuals
             record.error = None
             record.updated_at = utc_now()
@@ -398,6 +450,8 @@ class ProjectStore:
         with self._lock:
             paths = self.paths(project_id)
             record = ProjectRecord(**read_json(paths.status_file()))
+            if paths.cancel_file().exists() and status != ProjectStatus.failed:
+                return record
             if set_status:
                 record.status = status
                 if status != ProjectStatus.failed:
@@ -419,6 +473,8 @@ class ProjectStore:
         with self._lock:
             paths = self.paths(project_id)
             record = ProjectRecord(**read_json(paths.status_file()))
+            if paths.cancel_file().exists():
+                return
             if warning not in record.warnings:
                 record.warnings.append(warning)
             record.updated_at = utc_now()
@@ -429,6 +485,8 @@ class ProjectStore:
         with self._lock:
             paths = self.paths(project_id)
             record = ProjectRecord(**read_json(paths.status_file()))
+            if paths.cancel_file().exists():
+                return
             for kind in kinds:
                 record.outputs.pop(kind, None)
             record.updated_at = utc_now()
@@ -439,6 +497,8 @@ class ProjectStore:
         with self._lock:
             paths = self.paths(project_id)
             record = ProjectRecord(**read_json(paths.status_file()))
+            if paths.cancel_file().exists():
+                return
             record.warnings = []
             record.updated_at = utc_now()
             self._write_record(paths, record)
@@ -508,6 +568,8 @@ class ProjectStore:
             raise FileNotFoundError(path)
         with self._lock:
             record = ProjectRecord(**read_json(paths.status_file()))
+            if paths.cancel_file().exists():
+                return
             record.outputs[kind] = FILE_KIND_TO_PATH[kind]
             record.updated_at = utc_now()
             self._write_record(paths, record)
@@ -517,6 +579,8 @@ class ProjectStore:
         with self._lock:
             paths = self.paths(project_id)
             record = ProjectRecord(**read_json(paths.status_file()))
+            if paths.cancel_file().exists() and record.error and record.error.get("code") == "user_stopped":
+                return record
             record.status = ProjectStatus.failed
             record.error = error
             record.updated_at = utc_now()

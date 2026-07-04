@@ -1053,6 +1053,25 @@ def delete_project(project_id: str) -> dict:
     return {"project_id": record.project_id, "deleted": True}
 
 
+@router.post("/projects/{project_id}/cancel")
+def cancel_project(project_id: str) -> dict:
+    _get_existing_project(project_id)
+    record = store.cancel(project_id)
+    if record.error and record.error.get("code") == "user_stopped":
+        return {
+            "project_id": record.project_id,
+            "status": record.status,
+            "cancelled": True,
+            "error": record.error,
+        }
+    return {
+        "project_id": record.project_id,
+        "status": record.status,
+        "cancelled": False,
+        "message": "Project is not running.",
+    }
+
+
 @router.get("/projects/{project_id}/status")
 def get_project_status(project_id: str) -> dict:
     record = _get_existing_project(project_id)
@@ -1068,6 +1087,7 @@ def get_project_status(project_id: str) -> dict:
         "outputs": record.outputs,
         "warnings": record.warnings,
         "progress": _build_project_progress(record),
+        "can_cancel": store.can_cancel(project_id),
         "can_rerun_downstream": store.can_start_downstream_rerun(project_id),
         "downstream_rerun_missing_inputs": store.downstream_rerun_missing_inputs(project_id),
         "can_produce": store.can_start_produce(project_id),
