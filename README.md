@@ -179,7 +179,7 @@ API 文档：
 从 GitHub 公开仓库一键安装：
 
 ```bash
-YTXHS_REF=macmini-v20260704.6 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.6/install-from-github-macos.sh)"
+YTXHS_REF=macmini-v20260704.7 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.7/install-from-github-macos.sh)"
 ```
 
 或者生成离线部署包：

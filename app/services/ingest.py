@@ -184,6 +184,15 @@ def _is_media_download_forbidden(message: str) -> bool:
     return "unable to download video data" in lowered and ("http error 403" in lowered or "forbidden" in lowered)
 
 
+def _is_requested_format_unavailable(message: str) -> bool:
+    lowered = message.lower()
+    return "requested format is not available" in lowered or "use --list-formats for a list of available formats" in lowered
+
+
+def _should_try_public_android_fallback(message: str) -> bool:
+    return _is_media_download_forbidden(message) or _is_requested_format_unavailable(message)
+
+
 def _is_youtube_network_tls_error(message: str) -> bool:
     lowered = message.lower()
     return (
@@ -422,10 +431,10 @@ def ingest_video(url: str, language: str, paths: ProjectPaths) -> Dict[str, Any]
         subtitle_path = _find_downloaded_subtitle(paths.source_dir, subtitle_info.get("id"))
     except Exception as exc:
         message = str(exc)
-        if _is_media_download_forbidden(message):
+        if _should_try_public_android_fallback(message):
             ingest_warnings.append(
                 (
-                    "The subtitle preflight step hit YouTube media 403 before finding a usable subtitle. "
+                    "The subtitle preflight step could not use the primary YouTube web-client media format. "
                     "Continuing to media download fallback."
                 )
             )
@@ -439,14 +448,15 @@ def ingest_video(url: str, language: str, paths: ProjectPaths) -> Dict[str, Any]
             info = ydl.extract_info(url, download=True)
     except Exception as exc:
         message = str(exc)
-        if _is_media_download_forbidden(message):
+        if _should_try_public_android_fallback(message):
             fallback_opts = _public_android_fallback_opts(output_template, language)
             try:
                 with yt_dlp.YoutubeDL(fallback_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
                 ingest_warnings.append(
                     (
-                        "The primary YouTube web-client media download returned 403 Forbidden. "
+                        "The primary YouTube web-client media download failed because the requested format was "
+                        "unavailable or forbidden. "
                         "Retried with the public Android client without browser cookies and downloaded a low-resolution "
                         "progressive MP4 fallback."
                     )
