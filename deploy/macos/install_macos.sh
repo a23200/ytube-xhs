@@ -7,6 +7,7 @@ SOURCE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 APP_DIR="/opt/ytube-xhs"
 HOST="0.0.0.0"
 PORT="8012"
+LABEL="com.ytube-xhs.service"
 SERVICE_USER="${SUDO_USER:-$(id -un)}"
 SERVICE_GROUP=""
 LAUNCHD_MODE="daemon"
@@ -147,6 +148,95 @@ install_brew_package() {
   fi
 }
 
+print_launchd_diagnostics() {
+  local domain="$1"
+  local plist="$2"
+  echo
+  echo "launchd diagnostics:"
+  echo "  domain: $domain"
+  echo "  label:  $LABEL"
+  echo "  plist:  $plist"
+  if [ -f "$plist" ]; then
+    ls -l "$plist" || true
+    if command -v plutil >/dev/null 2>&1; then
+      plutil -lint "$plist" || true
+    fi
+  else
+    echo "  plist does not exist."
+  fi
+  echo
+  echo "launchctl print ${domain}/${LABEL}:"
+  launchctl print "${domain}/${LABEL}" 2>&1 | tail -n 120 || true
+  echo
+  echo "Recent service logs:"
+  if [ -f "$APP_DIR/runtime/logs/uvicorn.err.log" ]; then
+    echo "--- $APP_DIR/runtime/logs/uvicorn.err.log ---"
+    tail -n 120 "$APP_DIR/runtime/logs/uvicorn.err.log" || true
+  fi
+  if [ -f "$APP_DIR/runtime/logs/uvicorn.out.log" ]; then
+    echo "--- $APP_DIR/runtime/logs/uvicorn.out.log ---"
+    tail -n 80 "$APP_DIR/runtime/logs/uvicorn.out.log" || true
+  fi
+  echo
+  echo "Manual repair commands:"
+  echo "  sudo launchctl bootout ${domain}/${LABEL} 2>/dev/null || true"
+  echo "  sudo launchctl bootstrap ${domain} ${plist}"
+  echo "  sudo launchctl enable ${domain}/${LABEL}"
+  echo "  sudo launchctl kickstart -k ${domain}/${LABEL}"
+  echo "  $APP_DIR/deploy/macos/manage.sh logs"
+}
+
+launchctl_bootstrap_or_diagnose() {
+  local domain="$1"
+  local plist="$2"
+  local output rc
+
+  if launchctl print "${domain}/${LABEL}" >/dev/null 2>&1; then
+    echo "Existing launchd service found; unloading ${domain}/${LABEL} first..."
+    launchctl bootout "${domain}/${LABEL}" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
+  # Also try the domain+plist form, which clears some stale launchd records.
+  launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || true
+
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$plist"
+  fi
+
+  if output="$(launchctl bootstrap "$domain" "$plist" 2>&1)"; then
+    return 0
+  fi
+  rc=$?
+  echo "$output" >&2
+
+  if launchctl print "${domain}/${LABEL}" >/dev/null 2>&1; then
+    echo "launchctl bootstrap returned $rc, but ${domain}/${LABEL} is loaded; continuing."
+    return 0
+  fi
+
+  echo "launchctl bootstrap failed with exit code $rc." >&2
+  print_launchd_diagnostics "$domain" "$plist" >&2
+  return "$rc"
+}
+
+launchctl_enable_and_start_or_diagnose() {
+  local domain="$1"
+  local plist="$2"
+  local target="${domain}/${LABEL}"
+
+  if ! launchctl enable "$target"; then
+    echo "launchctl enable failed for $target." >&2
+    print_launchd_diagnostics "$domain" "$plist" >&2
+    return 1
+  fi
+  if ! launchctl kickstart -k "$target"; then
+    echo "launchctl kickstart failed for $target." >&2
+    print_launchd_diagnostics "$domain" "$plist" >&2
+    return 1
+  fi
+}
+
 echo "Installing ytube-xhs"
 echo "  source:       $SOURCE_DIR"
 echo "  app dir:      $APP_DIR"
@@ -234,12 +324,12 @@ if [ "$LAUNCHD_MODE" != "none" ]; then
   <string>${SERVICE_USER}</string>
   <key>GroupName</key>
   <string>${SERVICE_GROUP}</string>"
-    PLIST_DEST="/Library/LaunchDaemons/com.ytube-xhs.service.plist"
+    PLIST_DEST="/Library/LaunchDaemons/${LABEL}.plist"
     BOOTSTRAP_DOMAIN="system"
   else
     USER_BLOCK=""
     USER_HOME="$(dscl . -read "/Users/${SERVICE_USER}" NFSHomeDirectory | awk '{print $2}')"
-    PLIST_DEST="${USER_HOME}/Library/LaunchAgents/com.ytube-xhs.service.plist"
+    PLIST_DEST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
     BOOTSTRAP_DOMAIN="gui/$(id -u "$SERVICE_USER")"
     mkdir -p "$(dirname "$PLIST_DEST")"
   fi
@@ -260,10 +350,8 @@ PY
     cp "$PLIST_TMP" "$PLIST_DEST"
     chown root:wheel "$PLIST_DEST"
     chmod 644 "$PLIST_DEST"
-    launchctl bootout system/com.ytube-xhs.service >/dev/null 2>&1 || true
-    launchctl bootstrap system "$PLIST_DEST"
-    launchctl enable system/com.ytube-xhs.service
-    launchctl kickstart -k system/com.ytube-xhs.service
+    launchctl_bootstrap_or_diagnose "$BOOTSTRAP_DOMAIN" "$PLIST_DEST"
+    launchctl_enable_and_start_or_diagnose "$BOOTSTRAP_DOMAIN" "$PLIST_DEST"
   else
     cp "$PLIST_TMP" "$PLIST_DEST"
     chown "$SERVICE_USER:$SERVICE_GROUP" "$PLIST_DEST"
