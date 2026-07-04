@@ -377,6 +377,52 @@ def test_ingest_text_only_uses_subtitles_without_media_download(tmp_path: Path, 
     assert read_json(paths.source_dir / "metadata.json")["video_file"] is None
 
 
+def test_ingest_text_only_downloads_audio_only_when_no_subtitles(tmp_path: Path, monkeypatch):
+    paths = ingest.ProjectPaths(tmp_path / "project")
+    paths.ensure()
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_file", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_from_browser", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_impersonate", None)
+    monkeypatch.setattr(ingest, "_download_thumbnail", lambda url, output_path: None)
+    FakeYoutubeDL.calls = 0
+    FakeYoutubeDL.seen_opts_history = []
+
+    class SequenceYoutubeDL(FakeYoutubeDL):
+        def __init__(self, opts):
+            super().__init__(opts)
+            self.opts = opts
+
+        def extract_info(self, url, download=True):
+            FakeYoutubeDL.calls += 1
+            if FakeYoutubeDL.calls == 2:
+                (paths.source_dir / "audioonly.m4a").write_bytes(b"audio")
+            return {
+                "id": "audioonly",
+                "webpage_url": url,
+                "title": "Audio only text mode",
+                "uploader": "source",
+                "duration": 1800,
+                "subtitles": {},
+                "automatic_captions": {},
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=SequenceYoutubeDL))
+
+    metadata = ingest.ingest_video("https://www.youtube.com/watch?v=audioonly", "zh", paths, prefer_subtitles_only=True)
+
+    assert FakeYoutubeDL.calls == 2
+    assert metadata["video_file"] is None
+    assert metadata["audio_file"] == str(paths.source_dir / "audioonly.m4a")
+    assert metadata["subtitle_file"] is None
+    assert "audio-only" in metadata["ingest_warnings"][0]
+    preflight_opts, audio_opts = FakeYoutubeDL.seen_opts_history[:2]
+    assert preflight_opts["skip_download"] is True
+    assert audio_opts["format"] == "ba[abr<=64]/ba/bestaudio/best"
+    assert audio_opts["writesubtitles"] is False
+    assert audio_opts["socket_timeout"] == ingest.settings.ytdlp_socket_timeout_seconds
+    assert not list(paths.source_dir.glob("*.mp4"))
+
+
 def test_ingest_reports_youtube_tls_network_failure_separately(tmp_path: Path, monkeypatch):
     paths = ingest.ProjectPaths(tmp_path / "project")
     paths.ensure()

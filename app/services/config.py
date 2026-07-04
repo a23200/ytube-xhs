@@ -80,6 +80,7 @@ class Settings:
     ytdlp_cookies_file: Optional[Path]
     ytdlp_cookies_from_browser: Optional[str]
     ytdlp_impersonate: Optional[str]
+    ytdlp_socket_timeout_seconds: int
 
     def __init__(self) -> None:
         self.runtime_dir = _path_env("XHS_RUNTIME_DIR", DEFAULT_RUNTIME_DIR)
@@ -105,6 +106,7 @@ class Settings:
         self.ytdlp_cookies_file = _path_env("XHS_YTDLP_COOKIES_FILE", Path()) if raw_cookies_file else None
         self.ytdlp_cookies_from_browser = os.getenv("XHS_YTDLP_COOKIES_FROM_BROWSER") or None
         self.ytdlp_impersonate = os.getenv("XHS_YTDLP_IMPERSONATE") or None
+        self.ytdlp_socket_timeout_seconds = _int_env("XHS_YTDLP_SOCKET_TIMEOUT_SECONDS", 30)
 
 
 settings = Settings()

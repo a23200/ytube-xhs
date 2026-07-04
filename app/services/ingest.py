@@ -15,6 +15,8 @@ LANGUAGE_CANDIDATES = {
 
 DEFAULT_YTDLP_FORMAT = "bv*[height<=360]+ba/b[height<=360]/best[height<=360]/best"
 PUBLIC_ANDROID_FALLBACK_FORMAT = "18/best[height<=360]/best"
+AUDIO_ONLY_FORMAT = "ba[abr<=64]/ba/bestaudio/best"
+AUDIO_EXTENSIONS = {".m4a", ".mp3", ".webm", ".opus", ".ogg", ".wav", ".aac"}
 
 
 def _track_summary(tracks: Dict[str, Any]) -> Dict[str, Any]:
@@ -33,7 +35,12 @@ def _track_summary(tracks: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _safe_metadata(info: Dict[str, Any], video_path: Optional[Path], subtitle_path: Optional[Path]) -> Dict[str, Any]:
+def _safe_metadata(
+    info: Dict[str, Any],
+    video_path: Optional[Path],
+    subtitle_path: Optional[Path],
+    audio_path: Optional[Path] = None,
+) -> Dict[str, Any]:
     subtitles = info.get("subtitles") or {}
     automatic_captions = info.get("automatic_captions") or {}
     return {
@@ -51,7 +58,7 @@ def _safe_metadata(info: Dict[str, Any], video_path: Optional[Path], subtitle_pa
             "automatic_captions": _track_summary(automatic_captions),
         },
         "video_file": str(video_path) if video_path else None,
-        "audio_file": None,
+        "audio_file": str(audio_path) if audio_path else None,
         "subtitle_file": str(subtitle_path) if subtitle_path else None,
         "source_extractor": info.get("extractor_key") or info.get("extractor"),
         "source": {
@@ -137,6 +144,18 @@ def _find_downloaded_video(source_dir: Path, video_id: Optional[str]) -> Optiona
         if not path.is_file():
             continue
         if path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".m4v"}:
+            if video_id and video_id in path.name:
+                return path
+            candidates.append(path)
+    return candidates[0] if candidates else None
+
+
+def _find_downloaded_audio(source_dir: Path, video_id: Optional[str]) -> Optional[Path]:
+    candidates = []
+    for path in source_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix.lower() in AUDIO_EXTENSIONS:
             if video_id and video_id in path.name:
                 return path
             candidates.append(path)
@@ -278,6 +297,7 @@ def _base_ydl_opts(
         "no_warnings": False,
         "retries": 3,
         "fragment_retries": 3,
+        "socket_timeout": settings.ytdlp_socket_timeout_seconds,
         "extractor_args": {
             "youtube": {
                 "player_client": player_clients or ["web"],
@@ -316,6 +336,16 @@ def _public_android_fallback_opts(output_template: str, language: str) -> Dict[s
     )
 
 
+def _audio_only_opts(output_template: str, language: str) -> Dict[str, Any]:
+    return _base_ydl_opts(
+        output_template,
+        language,
+        download=True,
+        format_selector=AUDIO_ONLY_FORMAT,
+        write_subtitles=False,
+    )
+
+
 def _normalize_info(info: Any, url: str) -> Dict[str, Any]:
     if not info:
         raise PipelineError(
@@ -350,13 +380,14 @@ def _write_metadata(
     *,
     video_path: Optional[Path],
     subtitle_path: Optional[Path],
+    audio_path: Optional[Path] = None,
     thumbnail_from_video: bool = True,
     ingest_warnings: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     thumbnail_path = _download_thumbnail(info.get("thumbnail"), paths.source_dir / "thumbnail.jpg")
     if not thumbnail_path and thumbnail_from_video and video_path:
         thumbnail_path = _thumbnail_from_video(video_path, paths.source_dir / "thumbnail.jpg")
-    metadata = _safe_metadata(info, video_path, subtitle_path)
+    metadata = _safe_metadata(info, video_path, subtitle_path, audio_path=audio_path)
     if thumbnail_path:
         metadata["thumbnail_file"] = str(thumbnail_path)
     if ingest_warnings:
@@ -459,6 +490,43 @@ def ingest_video(
                 )
             )
         else:
+            _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
+
+    if prefer_subtitles_only:
+        audio_opts = _audio_only_opts(output_template, language)
+        try:
+            with yt_dlp.YoutubeDL(audio_opts) as ydl:
+                audio_info = _normalize_info(ydl.extract_info(url, download=True), url)
+            video_id = audio_info.get("id")
+            audio_path = _find_downloaded_audio(paths.source_dir, video_id)
+            subtitle_path = _find_downloaded_subtitle(paths.source_dir, video_id) or subtitle_path
+            if not audio_path:
+                raise PipelineError(
+                    code="audio_file_missing",
+                    message="yt-dlp completed audio-only download but no audio file was found.",
+                    step="ingest",
+                    details={"source_dir": str(paths.source_dir), "video_id": video_id},
+                )
+            return _write_metadata(
+                audio_info,
+                paths,
+                video_path=None,
+                subtitle_path=subtitle_path,
+                audio_path=audio_path,
+                thumbnail_from_video=False,
+                ingest_warnings=[
+                    *ingest_warnings,
+                    (
+                        "Text-only analysis mode did not find usable subtitles during preflight, so it downloaded "
+                        "audio-only for Whisper transcription and skipped full video download, keyframes, OCR, "
+                        "screenshots, and image-card generation."
+                    ),
+                ],
+            )
+        except PipelineError:
+            raise
+        except Exception as exc:
+            message = str(exc)
             _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
 
     ydl_opts = _base_ydl_opts(output_template, language, download=True)
