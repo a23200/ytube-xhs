@@ -220,7 +220,7 @@ def test_run_project_script_is_directly_executable():
 
 
 def test_main_exits_zero_for_partial_result_when_allowed(monkeypatch, capsys):
-    def fake_run_project(url: str, language: str, style: str, use_whisper: bool, max_frames: int) -> dict:
+    def fake_run_project(url: str, language: str, style: str, use_whisper: bool, max_frames: int, text_only: bool = False) -> dict:
         return {
             "project_id": "p1",
             "status": "failed",

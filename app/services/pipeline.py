@@ -3,7 +3,7 @@ from typing import Any, Dict
 from app.schemas.models import ProjectStatus
 from app.services.content_planner import build_basic_content_assets, build_content_assets
 from app.services.errors import PipelineError
-from app.services.frame_extractor import extract_keyframes
+from app.services.frame_extractor import extract_keyframes, write_skipped_keyframes
 from app.services.image_card_renderer import render_image_cards
 from app.services.image_prompt_writer import write_image_prompts
 from app.services.ingest import ingest_video
@@ -37,6 +37,83 @@ TOUTIAO_PRODUCE_OUTPUT_KINDS = [
 TOUTIAO_IMAGE_GENERATION_OUTPUT_KINDS = ["toutiao_image_cards", "asset_package"]
 VISUAL_AND_DOWNSTREAM_OUTPUT_KINDS = ["visual_analysis", *DOWNSTREAM_OUTPUT_KINDS]
 ANALYZE_LLM_FALLBACK_CODES = {"llm_unavailable", "missing_dependency", "llm_request_failed", "llm_json_parse_failed"}
+TEXT_ONLY_SKIP_REASON = (
+    "Text-only analysis mode enabled; skipped keyframe extraction, OCR, screenshots, and image-card generation."
+)
+
+
+def _text_only_prompt_placeholder() -> Dict[str, Any]:
+    return {
+        "image_prompts": [],
+        "skipped": True,
+        "skip_reason": "Text-only project; image prompt generation is disabled.",
+    }
+
+
+def _tag_text_only_assets(record: Any, assets: Dict[str, Any], paths: Any) -> Dict[str, Any]:
+    if not getattr(record, "text_only", False):
+        return assets
+    tagged = dict(assets)
+    tagged["analysis_mode"] = "text_only"
+    tagged["requested_outputs"] = ["article"]
+    tagged["skipped_outputs"] = ["keyframes", "ocr", "screenshots", "image_prompts", "image_cards"]
+    write_json(paths.analysis_dir / "content-assets.json", tagged)
+    return tagged
+
+
+def _build_keyframes_for_record(project_id: str, record: Any, metadata: Dict[str, Any], transcript: Dict[str, Any], paths: Any) -> Dict[str, Any]:
+    if getattr(record, "text_only", False):
+        store.set_status(project_id, ProjectStatus.extracting_frames, "Text-only mode: skipping keyframe extraction.")
+        keyframes = write_skipped_keyframes(
+            metadata,
+            transcript,
+            record.max_frames,
+            paths,
+            reason=TEXT_ONLY_SKIP_REASON,
+        )
+        store.add_output(project_id, "keyframes", paths.analysis_dir / "keyframes.json")
+        store.log(
+            project_id,
+            ProjectStatus.extracting_frames,
+            "Text-only mode skipped keyframe extraction.",
+            {"frames": 0, "text_only": True},
+        )
+        return keyframes
+
+    store.set_status(project_id, ProjectStatus.extracting_frames, "Detecting scenes and extracting keyframes.")
+    keyframes = extract_keyframes(metadata, transcript, record.max_frames, paths)
+    store.add_output(project_id, "keyframes", paths.analysis_dir / "keyframes.json")
+    store.log(project_id, ProjectStatus.extracting_frames, "Keyframes completed.", {"frames": keyframes.get("frame_count")})
+    return keyframes
+
+
+def _analyze_visuals_for_record(project_id: str, record: Any, keyframes: Dict[str, Any], paths: Any) -> Dict[str, Any]:
+    if getattr(record, "text_only", False):
+        store.set_status(project_id, ProjectStatus.analyzing_visuals, "Text-only mode: skipping OCR and visual analysis.")
+        visual = analyze_visuals(keyframes, record.language, paths, use_ocr=False)
+        for warning in visual.get("warnings", []):
+            store.add_warning(project_id, warning)
+        store.add_output(project_id, "visual_analysis", paths.analysis_dir / "visual-analysis.json")
+        store.log(
+            project_id,
+            ProjectStatus.analyzing_visuals,
+            "Text-only mode skipped OCR and visual analysis.",
+            {"ocr_provider": visual.get("ocr_provider"), "warnings": len(visual.get("warnings", [])), "text_only": True},
+        )
+        return visual
+
+    store.set_status(project_id, ProjectStatus.analyzing_visuals, "Running OCR and visual analysis providers.")
+    visual = analyze_visuals(keyframes, record.language, paths, use_ocr=record.use_ocr)
+    for warning in visual.get("warnings", []):
+        store.add_warning(project_id, warning)
+    store.add_output(project_id, "visual_analysis", paths.analysis_dir / "visual-analysis.json")
+    store.log(
+        project_id,
+        ProjectStatus.analyzing_visuals,
+        "Visual analysis completed.",
+        {"ocr_provider": visual.get("ocr_provider"), "warnings": len(visual.get("warnings", []))},
+    )
+    return visual
 
 
 def _record_ingest_warnings(project_id: str, metadata: Dict[str, Any]) -> None:
@@ -179,7 +256,7 @@ def run_project_pipeline(project_id: str) -> None:
     paths = store.paths(project_id)
     try:
         store.set_status(project_id, ProjectStatus.ingesting, "Fetching video metadata, media, subtitles, and thumbnail.")
-        metadata = ingest_video(record.url, record.language, paths)
+        metadata = ingest_video(record.url, record.language, paths, prefer_subtitles_only=record.text_only)
         _record_ingest_warnings(project_id, metadata)
         store.add_output(project_id, "metadata", paths.source_dir / "metadata.json")
         store.log(project_id, ProjectStatus.ingesting, "Ingest completed.", {"title": metadata.get("title")})
@@ -196,30 +273,29 @@ def run_project_pipeline(project_id: str) -> None:
             {"segments": transcript.get("segment_count"), "source": transcript.get("source")},
         )
 
-        store.set_status(project_id, ProjectStatus.extracting_frames, "Detecting scenes and extracting keyframes.")
-        keyframes = extract_keyframes(metadata, transcript, record.max_frames, paths)
-        store.add_output(project_id, "keyframes", paths.analysis_dir / "keyframes.json")
-        store.log(project_id, ProjectStatus.extracting_frames, "Keyframes completed.", {"frames": keyframes.get("frame_count")})
-
-        store.set_status(project_id, ProjectStatus.analyzing_visuals, "Running OCR and visual analysis providers.")
-        visual = analyze_visuals(keyframes, record.language, paths, use_ocr=record.use_ocr)
-        for warning in visual.get("warnings", []):
-            store.add_warning(project_id, warning)
-        store.add_output(project_id, "visual_analysis", paths.analysis_dir / "visual-analysis.json")
-        store.log(
-            project_id,
-            ProjectStatus.analyzing_visuals,
-            "Visual analysis completed.",
-            {"ocr_provider": visual.get("ocr_provider"), "warnings": len(visual.get("warnings", []))},
-        )
+        keyframes = _build_keyframes_for_record(project_id, record, metadata, transcript, paths)
+        visual = _analyze_visuals_for_record(project_id, record, keyframes, paths)
 
         store.set_status(project_id, ProjectStatus.planning_content, "Generating structured content assets with LLM.")
         assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
+        assets = _tag_text_only_assets(record, assets, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         store.log(project_id, ProjectStatus.planning_content, "Content assets completed.")
 
-        store.set_status(project_id, ProjectStatus.writing_xhs, "Writing Xiaohongshu post and image prompts.")
+        store.set_status(
+            project_id,
+            ProjectStatus.writing_xhs,
+            "Writing text-only Xiaohongshu article." if record.text_only else "Writing Xiaohongshu post and image prompts.",
+        )
         post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
+        if record.text_only:
+            prompts = _text_only_prompt_placeholder()
+            warnings = store.get(project_id).warnings
+            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
+            _register_standard_outputs(project_id)
+            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only XHS article completed. Image generation is disabled.")
+            return
+
         prompts = write_image_prompts(post, keyframes, visual, paths)
         store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards.")
         render_image_cards(metadata, assets, post, keyframes, prompts, paths)
@@ -272,19 +348,32 @@ def run_project_downstream_pipeline(project_id: str) -> None:
 
         store.set_status(project_id, ProjectStatus.planning_content, "Rerunning content planning from existing artifacts.")
         assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
+        assets = _tag_text_only_assets(record, assets, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         store.log(project_id, ProjectStatus.planning_content, "Content assets completed from existing artifacts.")
 
-        store.set_status(project_id, ProjectStatus.writing_xhs, "Rerunning Xiaohongshu post and image prompts.")
+        store.set_status(
+            project_id,
+            ProjectStatus.writing_xhs,
+            "Rerunning text-only Xiaohongshu article." if record.text_only else "Rerunning Xiaohongshu post and image prompts.",
+        )
         post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
-        prompts = write_image_prompts(post, keyframes, visual, paths)
-        store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards from rerun.")
-        render_image_cards(metadata, assets, post, keyframes, prompts, paths)
-        warnings = store.get(project_id).warnings
-        image_cards = read_json(paths.analysis_dir / "image-cards.json")
-        write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
+        if record.text_only:
+            prompts = _text_only_prompt_placeholder()
+            warnings = store.get(project_id).warnings
+            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
+        else:
+            prompts = write_image_prompts(post, keyframes, visual, paths)
+            store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards from rerun.")
+            render_image_cards(metadata, assets, post, keyframes, prompts, paths)
+            warnings = store.get(project_id).warnings
+            image_cards = read_json(paths.analysis_dir / "image-cards.json")
+            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
         _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.completed, "Downstream rerun completed.")
+        if record.text_only:
+            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only downstream rerun completed. Image generation is disabled.")
+        else:
+            store.set_status(project_id, ProjectStatus.completed, "Downstream rerun completed.")
     except PipelineError as exc:
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
@@ -327,7 +416,7 @@ def run_project_visual_pipeline(project_id: str) -> None:
 
         store.set_status(project_id, ProjectStatus.analyzing_visuals, "Rerunning OCR and visual analysis from existing keyframes.")
         store.clear_warnings(project_id)
-        visual = analyze_visuals(keyframes, record.language, paths, use_ocr=record.use_ocr)
+        visual = analyze_visuals(keyframes, record.language, paths, use_ocr=False if record.text_only else record.use_ocr)
         for warning in visual.get("warnings", []):
             store.add_warning(project_id, warning)
         store.add_output(project_id, "visual_analysis", paths.analysis_dir / "visual-analysis.json")
@@ -340,19 +429,28 @@ def run_project_visual_pipeline(project_id: str) -> None:
 
         store.set_status(project_id, ProjectStatus.planning_content, "Generating structured content assets with refreshed visuals.")
         assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
+        assets = _tag_text_only_assets(record, assets, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         store.log(project_id, ProjectStatus.planning_content, "Content assets completed from refreshed visuals.")
 
         store.set_status(project_id, ProjectStatus.writing_xhs, "Writing Xiaohongshu post and image prompts from refreshed visuals.")
         post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
-        prompts = write_image_prompts(post, keyframes, visual, paths)
-        store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards from refreshed visuals.")
-        render_image_cards(metadata, assets, post, keyframes, prompts, paths)
-        warnings = store.get(project_id).warnings
-        image_cards = read_json(paths.analysis_dir / "image-cards.json")
-        write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
+        if record.text_only:
+            prompts = _text_only_prompt_placeholder()
+            warnings = store.get(project_id).warnings
+            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
+        else:
+            prompts = write_image_prompts(post, keyframes, visual, paths)
+            store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards from refreshed visuals.")
+            render_image_cards(metadata, assets, post, keyframes, prompts, paths)
+            warnings = store.get(project_id).warnings
+            image_cards = read_json(paths.analysis_dir / "image-cards.json")
+            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
         _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.completed, "Visual and downstream rerun completed.")
+        if record.text_only:
+            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only visual/downstream rerun completed. Image generation is disabled.")
+        else:
+            store.set_status(project_id, ProjectStatus.completed, "Visual and downstream rerun completed.")
     except PipelineError as exc:
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
@@ -374,7 +472,7 @@ def run_project_analysis_pipeline(project_id: str) -> None:
     paths = store.paths(project_id)
     try:
         store.set_status(project_id, ProjectStatus.ingesting, "Fetching video metadata, media, subtitles, and thumbnail.")
-        metadata = ingest_video(record.url, record.language, paths)
+        metadata = ingest_video(record.url, record.language, paths, prefer_subtitles_only=record.text_only)
         _record_ingest_warnings(project_id, metadata)
         store.add_output(project_id, "metadata", paths.source_dir / "metadata.json")
         store.log(project_id, ProjectStatus.ingesting, "Ingest completed.", {"title": metadata.get("title")})
@@ -391,22 +489,8 @@ def run_project_analysis_pipeline(project_id: str) -> None:
             {"segments": transcript.get("segment_count"), "source": transcript.get("source")},
         )
 
-        store.set_status(project_id, ProjectStatus.extracting_frames, "Detecting scenes and extracting keyframes.")
-        keyframes = extract_keyframes(metadata, transcript, record.max_frames, paths)
-        store.add_output(project_id, "keyframes", paths.analysis_dir / "keyframes.json")
-        store.log(project_id, ProjectStatus.extracting_frames, "Keyframes completed.", {"frames": keyframes.get("frame_count")})
-
-        store.set_status(project_id, ProjectStatus.analyzing_visuals, "Running OCR and visual analysis providers.")
-        visual = analyze_visuals(keyframes, record.language, paths, use_ocr=record.use_ocr)
-        for warning in visual.get("warnings", []):
-            store.add_warning(project_id, warning)
-        store.add_output(project_id, "visual_analysis", paths.analysis_dir / "visual-analysis.json")
-        store.log(
-            project_id,
-            ProjectStatus.analyzing_visuals,
-            "Visual analysis completed.",
-            {"ocr_provider": visual.get("ocr_provider"), "warnings": len(visual.get("warnings", []))},
-        )
+        keyframes = _build_keyframes_for_record(project_id, record, metadata, transcript, paths)
+        visual = _analyze_visuals_for_record(project_id, record, keyframes, paths)
 
         store.set_status(project_id, ProjectStatus.planning_content, "Generating structured content assets with LLM.")
         try:
@@ -433,10 +517,16 @@ def run_project_analysis_pipeline(project_id: str) -> None:
                 paths,
                 fallback_reason=exc.message,
             )
+        assets = _tag_text_only_assets(record, assets, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         write_analysis_asset_package(metadata, transcript, keyframes, visual, assets, paths, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.analysis_completed, "Analysis completed. Review or edit content assets before producing XHS cards.")
+        completion_message = (
+            "Text-only analysis completed. Review or edit content assets before producing an article."
+            if record.text_only
+            else "Analysis completed. Review or edit content assets before producing XHS cards."
+        )
+        store.set_status(project_id, ProjectStatus.analysis_completed, completion_message)
     except PipelineError as exc:
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
@@ -485,13 +575,19 @@ def run_project_produce_pipeline(project_id: str) -> None:
         post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
         store.add_output(project_id, "xhs_post_json", paths.analysis_dir / "xiaohongshu-post.json")
 
-        prompts = write_image_prompts(post, keyframes, visual, paths)
-        store.add_output(project_id, "image_prompts", paths.analysis_dir / "image-prompts.json")
+        if record.text_only:
+            prompts = _text_only_prompt_placeholder()
+        else:
+            prompts = write_image_prompts(post, keyframes, visual, paths)
+            store.add_output(project_id, "image_prompts", paths.analysis_dir / "image-prompts.json")
 
         warnings = store.get(project_id).warnings
         write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
         _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.xhs_completed, "XHS article completed. Image generation can be run next.")
+        if record.text_only:
+            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only XHS article completed. Image generation is disabled.")
+        else:
+            store.set_status(project_id, ProjectStatus.xhs_completed, "XHS article completed. Image generation can be run next.")
     except PipelineError as exc:
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
@@ -540,13 +636,19 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
         post = write_toutiao_post(metadata, assets, keyframes, visual, record.style, paths)
         store.add_output(project_id, "toutiao_post_json", paths.analysis_dir / "toutiao-post.json")
 
-        prompts = write_image_prompts(post, keyframes, visual, paths, platform="toutiao")
-        store.add_output(project_id, "toutiao_image_prompts", paths.analysis_dir / "toutiao-image-prompts.json")
+        if record.text_only:
+            prompts = _text_only_prompt_placeholder()
+        else:
+            prompts = write_image_prompts(post, keyframes, visual, paths, platform="toutiao")
+            store.add_output(project_id, "toutiao_image_prompts", paths.analysis_dir / "toutiao-image-prompts.json")
 
         warnings = store.get(project_id).warnings
         write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={}, platform="toutiao")
         _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.toutiao_completed, "Toutiao article completed. Image generation can be run next.")
+        if record.text_only:
+            store.set_status(project_id, ProjectStatus.toutiao_completed, "Text-only Toutiao article completed. Image generation is disabled.")
+        else:
+            store.set_status(project_id, ProjectStatus.toutiao_completed, "Toutiao article completed. Image generation can be run next.")
     except PipelineError as exc:
         write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
         _register_standard_outputs(project_id)
@@ -566,6 +668,14 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
 def run_project_image_generation_pipeline(project_id: str, style: str = "clean") -> None:
     paths = store.paths(project_id)
     try:
+        record = store.get(project_id)
+        if record.text_only:
+            raise PipelineError(
+                code="text_only_image_generation_disabled",
+                message="Text-only projects do not generate image cards.",
+                step="rendering_cards",
+                details={"project_id": project_id},
+            )
         _clear_image_generation_outputs(project_id)
         required_files = {
             "metadata": paths.source_dir / "metadata.json",
@@ -621,6 +731,14 @@ def run_project_image_generation_pipeline(project_id: str, style: str = "clean")
 def run_project_toutiao_image_generation_pipeline(project_id: str, style: str = "clean") -> None:
     paths = store.paths(project_id)
     try:
+        record = store.get(project_id)
+        if record.text_only:
+            raise PipelineError(
+                code="text_only_image_generation_disabled",
+                message="Text-only projects do not generate Toutiao image cards.",
+                step="rendering_cards",
+                details={"project_id": project_id, "platform": "toutiao"},
+            )
         _clear_toutiao_image_generation_outputs(project_id)
         required_files = {
             "metadata": paths.source_dir / "metadata.json",

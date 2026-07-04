@@ -475,6 +475,12 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
         if step_state == "done":
             completed_steps += 1
         expected_outputs = list(ui["outputs"])
+        if getattr(record, "text_only", False):
+            expected_outputs = [
+                kind
+                for kind in expected_outputs
+                if kind not in {"image_prompts", "image_cards", "toutiao_image_prompts", "toutiao_image_cards"}
+            ]
         ready_outputs = [kind for kind in expected_outputs if outputs.get(kind)]
         steps.append(
             {
@@ -696,7 +702,16 @@ def produce_project_toutiao(project_id: str, background_tasks: BackgroundTasks, 
 
 @router.post("/projects/{project_id}/generate-images")
 def generate_project_images(project_id: str, background_tasks: BackgroundTasks, request: Optional[ProjectImageGenerateRequest] = None) -> dict:
-    _get_existing_project(project_id)
+    record = _get_existing_project(project_id)
+    if record.text_only:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "text_only_image_generation_disabled",
+                "message": "This project is in text-only mode; image cards are intentionally disabled.",
+                "status": record.status,
+            },
+        )
     if not store.can_start_image_generation(project_id):
         record = _get_existing_project(project_id)
         missing_inputs = store.image_generation_missing_inputs(project_id)
@@ -747,7 +762,17 @@ def generate_project_images(project_id: str, background_tasks: BackgroundTasks, 
 
 @router.post("/projects/{project_id}/generate-images/toutiao")
 def generate_project_toutiao_images(project_id: str, background_tasks: BackgroundTasks, request: Optional[ProjectImageGenerateRequest] = None) -> dict:
-    _get_existing_project(project_id)
+    record = _get_existing_project(project_id)
+    if record.text_only:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "text_only_image_generation_disabled",
+                "message": "This project is in text-only mode; Toutiao image cards are intentionally disabled.",
+                "status": record.status,
+                "platform": "toutiao",
+            },
+        )
     if not store.can_start_platform_image_generation(project_id, "toutiao"):
         record = _get_existing_project(project_id)
         missing_inputs = store.platform_image_generation_missing_inputs(project_id, "toutiao")
@@ -1034,6 +1059,7 @@ def get_project_status(project_id: str) -> dict:
     return {
         "project_id": record.project_id,
         "status": record.status,
+        "text_only": record.text_only,
         "status_label": STATUS_UI.get(_status_value(record.status), STATUS_UI["created"])["label"],
         "status_description": STATUS_UI.get(_status_value(record.status), STATUS_UI["created"])["description"],
         "updated_at": record.updated_at,

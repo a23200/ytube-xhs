@@ -143,6 +143,7 @@ class ProjectStore:
             style=request.style,
             use_whisper=request.use_whisper,
             use_ocr=request.use_ocr,
+            text_only=request.text_only,
             max_frames=request.max_frames,
             status=ProjectStatus.created,
             created_at=now,
@@ -224,10 +225,14 @@ class ProjectStore:
 
     def can_start_image_generation(self, project_id: str) -> bool:
         record = self.get(project_id)
+        if record.text_only:
+            return False
         return record.status in IMAGE_GENERATION_READY_STATUSES and not self._missing_image_generation_inputs(self.paths(project_id), record)
 
     def can_start_platform_image_generation(self, project_id: str, platform: str = "xhs") -> bool:
         record = self.get(project_id)
+        if record.text_only:
+            return False
         return record.status in IMAGE_GENERATION_READY_STATUSES and not self._missing_platform_image_generation_inputs(self.paths(project_id), record, platform)
 
     def can_start_visual_rerun(self, project_id: str) -> bool:
@@ -310,6 +315,8 @@ class ProjectStore:
         with self._lock:
             paths = self.paths(project_id)
             record = ProjectRecord(**read_json(paths.status_file()))
+            if record.text_only:
+                return False, record, []
             if record.status not in IMAGE_GENERATION_READY_STATUSES:
                 return False, record, []
             missing_inputs = self._missing_image_generation_inputs(paths, record)
@@ -334,6 +341,8 @@ class ProjectStore:
         with self._lock:
             paths = self.paths(project_id)
             record = ProjectRecord(**read_json(paths.status_file()))
+            if record.text_only:
+                return False, record, []
             if record.status not in IMAGE_GENERATION_READY_STATUSES:
                 return False, record, []
             missing_inputs = self._missing_platform_image_generation_inputs(paths, record, platform)

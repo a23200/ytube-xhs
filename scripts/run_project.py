@@ -25,6 +25,7 @@ def run_project(
     style: str,
     use_whisper: bool,
     max_frames: int,
+    text_only: bool = False,
 ) -> Dict[str, Any]:
     record = store.create(
         ProjectCreate(
@@ -33,6 +34,7 @@ def run_project(
             style=style,
             use_whisper=use_whisper,
             max_frames=max_frames,
+            text_only=text_only,
         )
     )
     run_project_pipeline(record.project_id)
@@ -115,6 +117,7 @@ def main() -> int:
     parser.add_argument("--style", default="干货")
     parser.add_argument("--max-frames", type=int, default=12)
     parser.add_argument("--no-whisper", action="store_true", help="Disable faster-whisper fallback when no subtitles are available.")
+    parser.add_argument("--text-only", action="store_true", help="Analyze transcript/copy only; skip keyframes, OCR, screenshots, and image-card rendering.")
     parser.add_argument(
         "--allow-partial",
         action="store_true",
@@ -135,6 +138,7 @@ def main() -> int:
             style=args.style,
             use_whisper=not args.no_whisper,
             max_frames=args.max_frames,
+            text_only=args.text_only,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result.get("rerun", {}).get("started") is False:

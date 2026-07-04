@@ -189,6 +189,16 @@ def _normalize_toutiao_post(
 def _repair_image_plan_anchors(payload: Dict[str, Any], keyframes_payload: Dict[str, Any]) -> Dict[str, Any]:
     frames = _keyframes(keyframes_payload)
     if not frames:
+        repaired_plan = []
+        for item in payload.get("image_plan", []) or []:
+            if not isinstance(item, dict):
+                repaired_plan.append(item)
+                continue
+            repaired = dict(item)
+            repaired["source_frame_time"] = None
+            repaired["source_frame_path"] = None
+            repaired_plan.append(repaired)
+        payload["image_plan"] = repaired_plan
         return payload
     allowed_paths = {str(frame.get("path") or "") for frame in frames if frame.get("path")}
     allowed_times = [float(frame["time"]) for frame in frames if frame.get("time") is not None]

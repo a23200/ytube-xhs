@@ -322,7 +322,7 @@ def test_analysis_pipeline_uses_local_basic_assets_when_llm_fails(tmp_path: Path
     video_path.write_bytes(b"mp4")
     _write_test_jpeg(frame_path)
 
-    def fake_ingest(url, language, paths):
+    def fake_ingest(url, language, paths, **kwargs):
         payload = {
             "video_id": "v1",
             "url": url,
@@ -402,7 +402,7 @@ def test_analysis_pipeline_continues_from_transcript_only_ingest(tmp_path: Path,
     )
     paths = test_store.paths(record.project_id)
 
-    def fake_ingest(url, language, paths):
+    def fake_ingest(url, language, paths, **kwargs):
         subtitle = paths.source_dir / "subtitles.vtt"
         subtitle.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\n真实字幕\n", encoding="utf-8")
         payload = {
@@ -436,6 +436,89 @@ def test_analysis_pipeline_continues_from_transcript_only_ingest(tmp_path: Path,
     assert "media 403; transcript-only" in updated.warnings
 
 
+def test_analysis_pipeline_text_only_skips_keyframes_and_ocr(tmp_path: Path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(pipeline, "store", test_store)
+    record = test_store.create(
+        ProjectCreate(
+            url="https://example.com/video",
+            language="zh",
+            style="干货",
+            use_whisper=True,
+            use_ocr=True,
+            text_only=True,
+            max_frames=8,
+        )
+    )
+    paths = test_store.paths(record.project_id)
+
+    def fake_ingest(url, language, paths, **kwargs):
+        assert kwargs["prefer_subtitles_only"] is True
+        video_path = paths.source_dir / "source.mp4"
+        video_path.write_bytes(b"mp4")
+        payload = {
+            "video_id": "v1",
+            "url": url,
+            "title": "source",
+            "author": "author",
+            "duration": 12,
+            "video_file": str(video_path),
+            "available_subtitles": ["zh-Hans"],
+            "automatic_captions": [],
+        }
+        write_json(paths.source_dir / "metadata.json", payload)
+        return payload
+
+    def fake_transcript(metadata, language, use_whisper, paths):
+        payload = {
+            "source": "subtitle",
+            "segment_count": 1,
+            "segments": [{"start": 0.0, "end": 1.0, "text": "真实字幕文案", "source": "subtitle"}],
+        }
+        write_json(paths.transcript_dir / "transcript.json", payload)
+        return payload
+
+    def fail_extract_keyframes(*args, **kwargs):
+        raise AssertionError("extract_keyframes should not run in text-only mode")
+
+    def fake_visual(keyframes, language, paths, use_ocr=True):
+        assert use_ocr is False
+        assert keyframes["skipped"] is True
+        payload = {
+            "ocr_provider": "none",
+            "requested_ocr_provider": "none",
+            "ocr_enabled": False,
+            "warnings": [keyframes["skip_reason"]],
+            "frames": [],
+            "skipped": True,
+            "skip_reason": keyframes["skip_reason"],
+        }
+        write_json(paths.analysis_dir / "visual-analysis.json", payload)
+        return payload
+
+    monkeypatch.setattr(pipeline, "ingest_video", fake_ingest)
+    monkeypatch.setattr(pipeline, "build_transcript", fake_transcript)
+    monkeypatch.setattr(pipeline, "extract_keyframes", fail_extract_keyframes)
+    monkeypatch.setattr(pipeline, "analyze_visuals", fake_visual)
+    _patch_fake_llm(monkeypatch)
+
+    pipeline.run_project_analysis_pipeline(record.project_id)
+
+    updated = test_store.get(record.project_id)
+    assert updated.status == "analysis_completed"
+    assert updated.text_only is True
+    assert updated.outputs["keyframes"] == "analysis/keyframes.json"
+    assert updated.outputs["visual_analysis"] == "analysis/visual-analysis.json"
+    assert "image_cards" not in updated.outputs
+    assert read_json(paths.analysis_dir / "keyframes.json")["analysis_mode"] == "text_only"
+    assert read_json(paths.analysis_dir / "keyframes.json")["frame_count"] == 0
+    assert read_json(paths.analysis_dir / "visual-analysis.json")["skipped"] is True
+    assets = read_json(paths.analysis_dir / "content-assets.json")
+    assert assets["analysis_mode"] == "text_only"
+    assert assets["requested_outputs"] == ["article"]
+    assert not list(paths.frames_dir.glob("*.jpg"))
+
+
 def test_analysis_pipeline_does_not_fallback_for_contract_errors(tmp_path: Path, monkeypatch):
     test_store = ProjectStore(tmp_path)
     monkeypatch.setattr(pipeline, "store", test_store)
@@ -455,7 +538,7 @@ def test_analysis_pipeline_does_not_fallback_for_contract_errors(tmp_path: Path,
     video_path.write_bytes(b"mp4")
     _write_test_jpeg(frame_path)
 
-    def fake_ingest(url, language, paths):
+    def fake_ingest(url, language, paths, **kwargs):
         payload = {
             "video_id": "v1",
             "url": url,
@@ -634,6 +717,120 @@ def test_produce_pipeline_generates_post_markdown_and_image_prompts(tmp_path: Pa
     package = read_json(paths.analysis_dir / "asset-package.json")
     assert package["materials"]["card_paths"] == []
     assert verify_project(paths.project_dir)["completed_ok"] is False
+
+
+def test_text_only_produce_pipeline_generates_article_without_image_prompts(tmp_path: Path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(pipeline, "store", test_store)
+    record = test_store.create(
+        ProjectCreate(
+            url="https://example.com/video",
+            language="zh",
+            style="清单",
+            use_whisper=True,
+            use_ocr=True,
+            text_only=True,
+            max_frames=8,
+        )
+    )
+    paths = test_store.paths(record.project_id)
+    write_json(
+        paths.source_dir / "metadata.json",
+        {
+            "video_id": "v1",
+            "url": "https://example.com/video",
+            "title": "source",
+            "author": "author",
+            "duration": 12,
+            "video_file": None,
+            "available_subtitles": ["zh-Hans"],
+            "automatic_captions": [],
+        },
+    )
+    write_json(
+        paths.transcript_dir / "transcript.json",
+        {
+            "source": "subtitle",
+            "segment_count": 1,
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "这是一段原始证据文本，需要被改写成适合小红书的表达。",
+                    "source": "subtitle:subtitles.vtt",
+                }
+            ],
+        },
+    )
+    write_json(
+        paths.analysis_dir / "keyframes.json",
+        {
+            "frame_count": 0,
+            "keyframes": [],
+            "skipped": True,
+            "analysis_mode": "text_only",
+            "skip_reason": "Text-only analysis mode enabled.",
+        },
+    )
+    write_json(
+        paths.analysis_dir / "visual-analysis.json",
+        {
+            "frames": [],
+            "warnings": ["Text-only analysis mode enabled."],
+            "skipped": True,
+            "skip_reason": "Text-only analysis mode enabled.",
+            "ocr_provider": "none",
+        },
+    )
+    write_json(
+        paths.analysis_dir / "content-assets.json",
+        {
+            "analysis_mode": "text_only",
+            "one_sentence_summary": "一句话总结",
+            "core_points": [
+                {
+                    "point": "观点",
+                    "why_it_matters": "原因",
+                    "evidence": [{"type": "transcript", "time": 0.5, "text": "这是一段原始证据文本，需要被改写成适合小红书的表达。"}],
+                }
+            ],
+            "golden_quotes": [{"quote": "改写金句", "time": 0.5, "rewrite_note": "已改写"}],
+            "chapters": [{"title": "章节", "start": 0.0, "end": 1.0, "summary": "总结"}],
+            "steps": [{"step": "步骤", "evidence_time": 0.5}],
+            "audience": ["目标用户"],
+            "pain_points": ["痛点"],
+            "xiaohongshu_angles": ["角度"],
+            "recommended_content_type": "清单",
+            "source_evidence": [
+                {
+                    "claim": "观点",
+                    "source_type": "transcript",
+                    "time": 0.5,
+                    "source_text": "这是一段原始证据文本，需要被改写成适合小红书的表达。",
+                }
+            ],
+        },
+    )
+    for kind in ["metadata", "transcript", "keyframes", "visual_analysis", "content_assets"]:
+        test_store.add_output(record.project_id, kind, paths.file_for_kind(kind))
+    _patch_fake_llm(monkeypatch)
+
+    pipeline.run_project_produce_pipeline(record.project_id)
+
+    updated = test_store.get(record.project_id)
+    assert updated.status == "xhs_completed"
+    assert updated.outputs["xhs_post_json"] == "analysis/xiaohongshu-post.json"
+    assert updated.outputs["xhs_post_md"] == "analysis/xhs-post.md"
+    assert "image_prompts" not in updated.outputs
+    assert "image_cards" not in updated.outputs
+    assert not (paths.analysis_dir / "image-prompts.json").exists()
+    assert not (paths.analysis_dir / "image-cards.json").exists()
+    post = read_json(paths.analysis_dir / "xiaohongshu-post.json")
+    assert post["image_plan"][0]["source_frame_time"] is None
+    assert post["image_plan"][0]["source_frame_path"] is None
+    package = read_json(paths.analysis_dir / "asset-package.json")
+    assert package["image_prompts"] == []
+    assert package["image_cards"] == []
 
 
 def test_toutiao_pipeline_generates_independent_post_prompts_and_cards(tmp_path: Path, monkeypatch):

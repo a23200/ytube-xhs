@@ -336,6 +336,47 @@ def test_ingest_retries_format_unavailable_with_public_android_fallback(tmp_path
     assert fallback_opts["format"] == "18/best[height<=360]/best"
 
 
+def test_ingest_text_only_uses_subtitles_without_media_download(tmp_path: Path, monkeypatch):
+    paths = ingest.ProjectPaths(tmp_path / "project")
+    paths.ensure()
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_file", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_from_browser", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_impersonate", None)
+    monkeypatch.setattr(ingest, "_download_thumbnail", lambda url, output_path: None)
+    FakeYoutubeDL.calls = 0
+    FakeYoutubeDL.seen_opts_history = []
+
+    class SequenceYoutubeDL(FakeYoutubeDL):
+        def __init__(self, opts):
+            super().__init__(opts)
+            self.opts = opts
+
+        def extract_info(self, url, download=True):
+            FakeYoutubeDL.calls += 1
+            subtitle = paths.source_dir / "textonly.zh-Hans.vtt"
+            subtitle.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\n真实字幕\n", encoding="utf-8")
+            return {
+                "id": "textonly",
+                "webpage_url": url,
+                "title": "Text only video",
+                "uploader": "source",
+                "duration": 60,
+                "subtitles": {},
+                "automatic_captions": {"zh-Hans": [{"ext": "vtt"}]},
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=SequenceYoutubeDL))
+
+    metadata = ingest.ingest_video("https://www.youtube.com/watch?v=textonly", "zh", paths, prefer_subtitles_only=True)
+
+    assert FakeYoutubeDL.calls == 1
+    assert metadata["video_id"] == "textonly"
+    assert metadata["video_file"] is None
+    assert metadata["subtitle_file"] == str(paths.source_dir / "subtitles.vtt")
+    assert "Text-only analysis mode" in metadata["ingest_warnings"][0]
+    assert read_json(paths.source_dir / "metadata.json")["video_file"] is None
+
+
 def test_ingest_reports_youtube_tls_network_failure_separately(tmp_path: Path, monkeypatch):
     paths = ingest.ProjectPaths(tmp_path / "project")
     paths.ensure()

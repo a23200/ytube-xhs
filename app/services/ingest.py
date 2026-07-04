@@ -409,7 +409,13 @@ def _raise_ingest_ytdlp_error(message: str, exc: Exception, url: str, language: 
     ) from exc
 
 
-def ingest_video(url: str, language: str, paths: ProjectPaths) -> Dict[str, Any]:
+def ingest_video(
+    url: str,
+    language: str,
+    paths: ProjectPaths,
+    *,
+    prefer_subtitles_only: bool = False,
+) -> Dict[str, Any]:
     paths.ensure()
     try:
         import yt_dlp
@@ -429,6 +435,20 @@ def ingest_video(url: str, language: str, paths: ProjectPaths) -> Dict[str, Any]
         with yt_dlp.YoutubeDL(preflight_opts) as ydl:
             subtitle_info = _normalize_info(ydl.extract_info(url, download=True), url)
         subtitle_path = _find_downloaded_subtitle(paths.source_dir, subtitle_info.get("id"))
+        if prefer_subtitles_only and subtitle_path:
+            return _write_metadata(
+                subtitle_info,
+                paths,
+                video_path=None,
+                subtitle_path=subtitle_path,
+                thumbnail_from_video=False,
+                ingest_warnings=[
+                    (
+                        "Text-only analysis mode found a usable subtitle track, so media download was skipped. "
+                        "Keyframes, OCR, screenshots, and image-card generation are disabled for this run."
+                    )
+                ],
+            )
     except Exception as exc:
         message = str(exc)
         if _should_try_public_android_fallback(message):

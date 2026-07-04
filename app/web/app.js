@@ -253,6 +253,10 @@ function routeCardsReady(outputs, route = currentContentRoute()) {
   return Boolean(outputs?.[route.cards]);
 }
 
+function isTextOnlyProject(detail = state.workbenchDetail) {
+  return Boolean(detail?.record?.text_only || detail?.files?.content_assets?.analysis_mode === "text_only");
+}
+
 function isRunning(status) {
   return Boolean(status && !["analysis_completed", "xhs_completed", "toutiao_completed", "completed", "failed"].includes(status));
 }
@@ -333,16 +337,23 @@ function logMessageZh(message) {
     "Transcript completed.": "字幕时间轴生成完成。",
     "Detecting scenes and extracting keyframes.": "正在检测场景并抽取关键帧。",
     "Keyframes completed.": "关键帧抽取完成。",
+    "Text-only mode: skipping keyframe extraction.": "纯文案模式：跳过关键帧抽取。",
+    "Text-only mode skipped keyframe extraction.": "纯文案模式已跳过关键帧抽取。",
+    "Text-only mode: skipping OCR and visual analysis.": "纯文案模式：跳过 OCR 和视觉分析。",
+    "Text-only mode skipped OCR and visual analysis.": "纯文案模式已跳过 OCR 和视觉分析。",
     "Running OCR and visual analysis providers.": "正在运行 OCR 和视觉分析。",
     "Visual analysis completed.": "视觉/OCR 分析完成。",
     "No video file is available; continuing with transcript-only analysis.": "没有可用视频文件，已改用真实字幕继续分析。",
     "Generating structured content assets with LLM.": "正在用 LLM 生成真实创作底稿。",
     "Analysis completed. Review or edit content assets before producing XHS cards.": "解析完成。请确认或编辑创作底稿后再产出图文。",
+    "Text-only analysis completed. Review or edit content assets before producing an article.": "纯文案解析完成。请确认或编辑创作底稿后再产出文章。",
     "Produce job queued.": "图文产出任务已排队。",
     "Generating Xiaohongshu post from reviewed analysis assets.": "正在根据已确认解析生成小红书稿。",
     "Generating Toutiao post from reviewed analysis assets.": "正在根据已确认解析生成今日头条稿。",
     "XHS article completed. Image generation can be run next.": "小红书稿已完成，接下来会调用独立生图 API。",
     "Toutiao article completed. Image generation can be run next.": "今日头条稿已完成，接下来会调用独立生图 API。",
+    "Text-only XHS article completed. Image generation is disabled.": "纯文案小红书文章已完成，不会生成图片卡片。",
+    "Text-only Toutiao article completed. Image generation is disabled.": "纯文案今日头条文章已完成，不会生成图片卡片。",
     "Image generation job queued.": "生图任务已排队。",
     "Rendering finished Xiaohongshu image-card PNG files.": "正在渲染小红书图文卡片 PNG。",
     "Rendering finished Toutiao image-card PNG files.": "正在渲染今日头条图文卡片 PNG。",
@@ -569,6 +580,7 @@ async function hydrateProjectSummary(project) {
     toutiaoReady: Boolean(project.outputs?.toutiao_post_json),
     cardCount: cached.cardCount ?? 0,
     toutiaoCardCount: cached.toutiaoCardCount ?? 0,
+    textOnly: Boolean(project.text_only),
   };
   if (project.outputs?.metadata && !cached.metadataLoaded) {
     try {
@@ -719,15 +731,17 @@ function renderCreateJobPanel() {
   const hasAnalysis = Boolean(detail?.files?.content_assets);
   const hasPost = routeHasPost(detail, route);
   const hasCards = routeHasCards(detail, route);
+  const defaultTextOnly = true;
+  const textOnly = detail ? isTextOnlyProject(detail) : defaultTextOnly;
   const selectedRouteStatus = routeStatus(detail?.status || state.activeStatus, route);
   const llmReady = state.llmSettings ? (!state.llmSettings.auth_required || state.llmSettings.api_key_configured) : false;
   const canProduceArticle = Boolean(detail?.status?.can_produce && hasAnalysis && !isRunning(status) && llmReady);
-  const canGenerateImages = Boolean(selectedRouteStatus.can_generate_images && hasPost && !hasCards && !isRunning(status));
+  const canGenerateImages = Boolean(!textOnly && selectedRouteStatus.can_generate_images && hasPost && !hasCards && !isRunning(status));
   const produceReady = canProduceArticle || canGenerateImages;
-  const produceLabel = canGenerateImages ? "继续生成图片卡片" : "一键产出图文";
+  const produceLabel = textOnly ? "一键产出文章" : (canGenerateImages ? "继续生成图片卡片" : "一键产出图文");
   const llmNote = llmReady
-    ? `LLM 已配置，可在“LLM 配置”页自检连通性；${route.label}稿生成依赖实时接口稳定性。`
-    : "LLM 未配置：可分析解析；文章生成不能伪造，已生成文章后仍可单独调用生图 API。";
+    ? `LLM 已配置，可在“LLM 配置”页自检连通性；${route.label}稿生成依赖实时接口稳定性。${textOnly ? "当前项目为纯文案模式，不会生成图片卡片。" : ""}`
+    : "LLM 未配置：可分析解析；文章生成不能伪造。纯文案模式只产出文章，不调用生图。";
   return `
     <section class="panel workbench-control-card">
       <div class="panel-header">
@@ -764,15 +778,19 @@ function renderCreateJobPanel() {
           </div>
           <label class="field">
             最大关键帧数量
-            <input id="max_frames" name="max_frames" type="number" min="8" max="20" value="12" />
+            <input id="max_frames" name="max_frames" type="number" min="8" max="20" value="12" disabled />
           </label>
           <div class="check-row">
+            <label class="check-field">
+              <input id="text_only" name="text_only" type="checkbox" checked />
+              <span>仅提取文案/字幕，不抽关键帧、不 OCR、不生成图片</span>
+            </label>
             <label class="check-field">
               <input id="use_whisper" name="use_whisper" type="checkbox" checked />
               <span>无字幕时启用 Whisper</span>
             </label>
             <label class="check-field">
-              <input id="use_ocr" name="use_ocr" type="checkbox" checked />
+              <input id="use_ocr" name="use_ocr" type="checkbox" disabled />
               <span>启用 OCR 识别</span>
             </label>
           </div>
@@ -796,6 +814,22 @@ function renderCreateJobPanel() {
       </div>
     </section>
   `;
+}
+
+function syncTextOnlyControls(form) {
+  if (!form) return;
+  const textOnly = Boolean(form.elements.text_only?.checked);
+  const maxFrames = form.elements.max_frames;
+  const useOcr = form.elements.use_ocr;
+  if (maxFrames) maxFrames.disabled = textOnly;
+  if (useOcr) {
+    useOcr.disabled = textOnly;
+    if (textOnly) {
+      useOcr.checked = false;
+    } else if (!useOcr.checked) {
+      useOcr.checked = true;
+    }
+  }
 }
 
 function renderWorkbenchStatusCard() {
@@ -875,7 +909,7 @@ function renderRecentProjectsCompact() {
           return `
             <button class="recent-project ${state.activeProjectId === project.project_id ? "active" : ""}" data-action="select-project" data-project-id="${project.project_id}" type="button">
               <span>${escapeHtml(textSnippet(summary.title || project.project_id, 42))}</span>
-              <small>${escapeHtml(statusLabel(project.status))} · ${Number(summary.frameCount || 0)} 帧 · ${Number(summary.cardCount || 0)} 卡</small>
+              <small>${escapeHtml(statusLabel(project.status))} · ${summary.textOnly ? "纯文案" : `${Number(summary.frameCount || 0)} 帧 · ${Number(summary.cardCount || 0)} 卡`}</small>
             </button>
           `;
         }).join("") : emptyState("暂无项目", "提交链接后会出现在这里。")}
@@ -900,12 +934,13 @@ function renderAnalysisReadablePanel(detail) {
   const assets = detail.files.content_assets;
   const transcript = detail.files.transcript;
   const frames = mergedFrames(detail).slice(0, 8);
+  const textOnly = isTextOnlyProject(detail);
   return `
     <section id="analysis-readable-panel" class="panel pad analysis-panel">
       <div class="row between wrap">
         <div class="section-title">
           <h3>信息提炼结果</h3>
-          <p>普通创作者可读的创作底稿，可编辑后保存并作为原创图文产出输入。</p>
+          <p>${escapeHtml(textOnly ? "纯文案模式：基于字幕/文案解析创作底稿，不抽关键帧、不 OCR、不生成图片。" : "普通创作者可读的创作底稿，可编辑后保存并作为原创图文产出输入。")}</p>
         </div>
         <div class="row wrap">
           <button class="ghost-button" data-action="save-content-assets" type="button" ${assets ? "" : "disabled"}>保存创作底稿</button>
@@ -916,7 +951,7 @@ function renderAnalysisReadablePanel(detail) {
       ${renderWorkbenchMetadata(metadata, detail)}
       ${assets ? renderEditableAssets(assets) : emptyState("创作底稿尚未生成", "Analyze 完成后会生成 content-assets.json。")}
       ${transcript ? renderTranscriptSummary(transcript) : ""}
-      ${frames.length ? renderKeyframeSummaryStrip(detail, frames) : ""}
+      ${!textOnly && frames.length ? renderKeyframeSummaryStrip(detail, frames) : ""}
       <div id="analysis-save-message"></div>
     </section>
   `;
@@ -935,11 +970,12 @@ function renderWorkbenchMetadata(metadata, detail) {
           <h4>${escapeHtml(title)}</h4>
           ${statusPill(detail.status.status)}
         </div>
-        <div class="meta-grid compact-meta">
-          <div class="meta-item"><span>作者</span><b>${escapeHtml(metadata.author || "未知")}</b></div>
-          <div class="meta-item"><span>时长</span><b>${escapeHtml(secondsLabel(metadata.duration))}</b></div>
-          <div class="meta-item"><span>URL</span><a href="${escapeHtml(metadata.url || detail.record.url)}" target="_blank" rel="noreferrer">${escapeHtml(textSnippet(metadata.url || detail.record.url, 48))}</a></div>
-        </div>
+          <div class="meta-grid compact-meta">
+            <div class="meta-item"><span>作者</span><b>${escapeHtml(metadata.author || "未知")}</b></div>
+            <div class="meta-item"><span>时长</span><b>${escapeHtml(secondsLabel(metadata.duration))}</b></div>
+            <div class="meta-item"><span>解析模式</span><b>${detail.record.text_only ? "纯文案" : "图文"}</b></div>
+            <div class="meta-item"><span>URL</span><a href="${escapeHtml(metadata.url || detail.record.url)}" target="_blank" rel="noreferrer">${escapeHtml(textSnippet(metadata.url || detail.record.url, 48))}</a></div>
+          </div>
       </div>
     </div>
   `;
@@ -1032,6 +1068,7 @@ function renderKeyframeSummaryStrip(detail, frames) {
 
 function renderProducePanel(detail) {
   const route = currentContentRoute();
+  const textOnly = isTextOnlyProject(detail);
   if (!detail) {
     return `
       <section id="produce-panel" class="panel pad produce-panel">
@@ -1049,16 +1086,16 @@ function renderProducePanel(detail) {
     <section id="produce-panel" class="panel pad produce-panel">
       <div class="row between wrap">
         <div class="section-title">
-          <h3>${escapeHtml(route.title)}</h3>
-          <p>文章由 Produce 生成；PNG 卡片由独立生图 API 渲染，可编辑后重新出图。</p>
+          <h3>${escapeHtml(textOnly ? `${route.label}文章` : route.title)}</h3>
+          <p>${escapeHtml(textOnly ? "纯文案模式只根据字幕/文案解析生成文章，不生成截图、关键帧或 PNG 卡片。" : "文章由 Produce 生成；PNG 卡片由独立生图 API 渲染，可编辑后重新出图。")}</p>
         </div>
         <div class="row wrap">
           <button class="ghost-button" data-action="save-post" type="button" ${post ? "" : "disabled"}>保存文章</button>
-          <button class="ghost-button" data-action="save-image-cards" type="button" ${cards ? "" : "disabled"}>保存卡片</button>
+          ${textOnly ? "" : `<button class="ghost-button" data-action="save-image-cards" type="button" ${cards ? "" : "disabled"}>保存卡片</button>`}
         </div>
       </div>
       ${post ? renderArticleEditor(post) : emptyState("文章尚未生成", route.emptyText)}
-      ${cards ? renderImageCardGallery(detail, cards, route) : ""}
+      ${!textOnly && cards ? renderImageCardGallery(detail, cards, route) : ""}
       ${renderWorkbenchDownloads(detail, route)}
       <div id="produce-save-message"></div>
     </section>
@@ -1123,13 +1160,16 @@ function renderImageCardGallery(detail, imageCards, route = currentContentRoute(
 
 function renderWorkbenchDownloads(detail, route = currentContentRoute()) {
   const outputs = detail.status.outputs || {};
+  const textOnly = isTextOnlyProject(detail);
   return `
     <div class="download-strip">
       <a class="ghost-button ${outputs[route.postMd] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.postMd}">Markdown</a>
       <a class="ghost-button ${outputs[route.postJson] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.postJson}">文章 JSON</a>
-      <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.cards}">卡片 JSON</a>
-      <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/${route.cardsDownloadPath}">卡片 ZIP</a>
-      <a class="ghost-button ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">关键帧 ZIP</a>
+      ${textOnly ? "" : `
+        <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.cards}">卡片 JSON</a>
+        <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/${route.cardsDownloadPath}">卡片 ZIP</a>
+        <a class="ghost-button ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">关键帧 ZIP</a>
+      `}
       <a class="button" href="/api/projects/${detail.projectId}/download">完整 ZIP</a>
     </div>
   `;
@@ -1325,7 +1365,7 @@ function renderProjectTable(projects, options = {}) {
                 <td>${statusPill(project.status)}</td>
                 <td class="small-text">${escapeHtml(safeDate(project.created_at))}</td>
                 <td class="small-text">${escapeHtml(elapsed)}</td>
-                <td>${Number(summary.frameCount || 0)}</td>
+                <td>${summary.textOnly ? "纯文案" : Number(summary.frameCount || 0)}</td>
                 <td>${renderProjectRoutePills(project.outputs || {})}</td>
                 <td>
                   <div class="row wrap">
@@ -1582,7 +1622,10 @@ function renderKeyframesTab(detail) {
   const frames = mergedFrames(detail);
   state.modalFrames = frames;
   if (!detail.files.keyframes) return `<section class="panel pad">${emptyState("关键帧尚不可用", "等待“抽取关键帧”阶段完成。")}</section>`;
-  if (!frames.length) return `<section class="panel pad">${emptyState("没有关键帧", "后端没有登记可下载的关键帧。")}</section>`;
+  if (!frames.length) {
+    const reason = detail.files.keyframes.skip_reason || "后端没有登记可下载的关键帧。";
+    return `<section class="panel pad">${emptyState("没有关键帧", reason)}</section>`;
+  }
   return `
     <section class="panel pad">
       <div class="section-title">
@@ -1624,6 +1667,7 @@ function renderVisualTab(detail) {
         <span class="status-pill ${visual.warnings?.length ? "status-warning" : "status-ok"}">${visual.warnings?.length || 0} 条警告</span>
       </div>
       ${visual.warnings?.length ? warningState(visual.warnings.join(" / ")) : ""}
+      ${visual.skipped ? emptyState("已跳过 OCR / 视觉分析", visual.skip_reason || "当前项目为纯文案模式。") : ""}
       <div class="split-list">
         ${frames.map((frame) => `
           <article class="asset-item">
@@ -1690,6 +1734,7 @@ function renderChipBlock(title, items) {
 function renderPostTab(detail, route) {
   const post = routePost(detail, route);
   if (!post) return `<section class="panel pad">${emptyState(route.emptyPostTitle, "配置 LLM 并重跑文案生成后，这里会显示标题、正文和配图规划。")}</section>`;
+  const textOnly = isTextOnlyProject(detail);
   const prompts = routePrompts(detail, route)?.image_prompts || [];
   return `
     <div class="grid two">
@@ -1705,7 +1750,7 @@ function renderPostTab(detail, route) {
         ${renderChipBlock("标签", post.hashtags)}
         <div class="asset-item"><h4>发布建议</h4><p>${escapeHtml(post.publish_suggestion || "")}</p></div>
       </section>
-      <section class="panel pad stack">
+      ${textOnly ? "" : `<section class="panel pad stack">
         ${renderAssetList("配图规划", post.image_plan, (item) => `
           <h4>第 ${escapeHtml(item.page)} 页 · ${escapeHtml(item.role)} · ${escapeHtml(item.caption)}</h4>
           <p>${escapeHtml(item.content_point || "")}</p>
@@ -1716,13 +1761,14 @@ function renderPostTab(detail, route) {
           <p>${escapeHtml(item.image_prompt)}</p>
           <p class="small-text"><b>反向提示词:</b> ${escapeHtml(item.negative_prompt)}</p>
         `)}
-      </section>
+      </section>`}
     </div>
   `;
 }
 
 function renderFilesTab(detail) {
   const outputs = detail.status.outputs || {};
+  const textOnly = isTextOnlyProject(detail);
   return `
     <section class="panel pad stack">
       <div class="section-title">
@@ -1733,9 +1779,9 @@ function renderFilesTab(detail) {
         <a id="download-all" class="download-card" href="/api/projects/${detail.projectId}/download">
           <b>完整 ZIP</b><span>runtime/projects/${escapeHtml(detail.projectId)}</span>
         </a>
-        <a id="download-frames-zip" class="download-card ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">
+        ${textOnly ? "" : `<a id="download-frames-zip" class="download-card ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">
           <b>关键帧素材 ZIP</b><span>frames/*.jpg</span>
-        </a>
+        </a>`}
         ${FILE_KINDS.map(([kind, label, path]) => `
           <a id="download-${kind.replaceAll("_", "-")}" class="download-card ${outputs[kind] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${kind}">
             <b>${escapeHtml(label)}</b>
@@ -1963,7 +2009,8 @@ function startPolling(projectId) {
       const status = await loadStatus(projectId);
       const route = CONTENT_ROUTES[state.pendingImageGenerationRoute] || currentContentRoute();
       const selectedRouteStatus = routeStatus(status, route);
-      if (status.status === route.completedStatus && state.pendingImageGenerationProjectId === projectId) {
+      const textOnly = Boolean(status.text_only || state.workbenchDetail?.record?.text_only);
+      if (!textOnly && status.status === route.completedStatus && state.pendingImageGenerationProjectId === projectId) {
         if (selectedRouteStatus.can_generate_images && !status.outputs?.[route.cards]) {
           try {
             await apiPost(`/api/projects/${projectId}/${route.imagePath}`, { style: "clean" });
@@ -1980,7 +2027,7 @@ function startPolling(projectId) {
           state.pendingImageGenerationRoute = "";
         }
       }
-      if (status.status === "completed" || status.status === "failed") {
+      if (textOnly || status.status === "completed" || status.status === "failed") {
         state.pendingImageGenerationProjectId = "";
         state.pendingImageGenerationRoute = "";
       }
@@ -2024,6 +2071,7 @@ async function submitProject(form) {
     max_frames: Number(form.elements.max_frames.value || 12),
     use_whisper: form.elements.use_whisper.checked,
     use_ocr: form.elements.use_ocr.checked,
+    text_only: form.elements.text_only.checked,
   };
   try {
     const created = await apiPost("/api/projects/analyze", payload);
@@ -2052,8 +2100,9 @@ async function produceActiveProject() {
   const selectedRouteStatus = routeStatus(status, route);
   const hasPost = routeHasPost(detail, route);
   const hasCards = routeHasCards(detail, route);
+  const textOnly = isTextOnlyProject(detail);
   try {
-    if (hasPost && !hasCards && selectedRouteStatus.can_generate_images) {
+    if (!textOnly && hasPost && !hasCards && selectedRouteStatus.can_generate_images) {
       await apiPost(`/api/projects/${state.activeProjectId}/${route.imagePath}`, { style: "clean" });
       state.pendingImageGenerationProjectId = "";
       state.pendingImageGenerationRoute = "";
@@ -2066,10 +2115,10 @@ async function produceActiveProject() {
       return;
     }
     const contentAssets = collectContentAssetsFromEditors();
-    state.pendingImageGenerationProjectId = state.activeProjectId;
-    state.pendingImageGenerationRoute = route.key;
+    state.pendingImageGenerationProjectId = textOnly ? "" : state.activeProjectId;
+    state.pendingImageGenerationRoute = textOnly ? "" : route.key;
     await apiPost(`/api/projects/${state.activeProjectId}/${route.producePath}`, { content_assets: contentAssets });
-    toast(route.produceToast);
+    toast(textOnly ? `已开始生成${route.label}文章；纯文案模式不会生成图片卡片。` : route.produceToast);
     await renderDashboard();
   } catch (error) {
     state.pendingImageGenerationProjectId = "";
@@ -2443,6 +2492,9 @@ document.addEventListener("input", (event) => {
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
     }
+  }
+  if (event.target.id === "text_only") {
+    syncTextOnlyControls(event.target.form);
   }
 });
 

@@ -103,6 +103,7 @@ def write_reports(
     image_cards = image_cards or {}
     is_toutiao = platform == "toutiao"
     platform_name = "今日头条" if is_toutiao else "小红书"
+    text_only = content_assets.get("analysis_mode") == "text_only" or keyframes_payload.get("analysis_mode") == "text_only"
     post_key = "toutiao_post" if is_toutiao else "xiaohongshu_post"
     markdown_filename = "toutiao-post.md" if is_toutiao else "xhs-post.md"
     cards_dir = paths.toutiao_cards_dir if is_toutiao else paths.cards_dir
@@ -157,7 +158,28 @@ def write_reports(
     titles = xhs_post.get("titles", [])
     image_plan = xhs_post.get("image_plan", [])
     hashtags = xhs_post.get("hashtags", [])
-    markdown = f"""# {platform_name}图文稿
+    image_sections = ""
+    if not text_only:
+        image_sections = f"""
+## 配图规划
+
+{_md_list([f"第 {item.get('page')} 页｜{item.get('role')}｜{item.get('caption')}｜来源：{_frame_anchor(item)}｜内容点：{item.get('content_point') or ''}" for item in image_plan])}
+
+## 图片提示词
+
+{_md_list([f"第 {item.get('page')} 页｜{item.get('caption')}｜参考：{item.get('visual_reference')}｜来源：{_frame_anchor(item)}｜提示词：{item.get('image_prompt')}｜负向：{item.get('negative_prompt')}" for item in image_prompts.get("image_prompts", [])])}
+
+## 图文卡片
+
+{_md_list([f"第 {item.get('page')} 页｜{item.get('role')}｜{item.get('title')}｜{item.get('caption')}｜来源：{_frame_anchor(item)}｜文件：{item.get('output_path')}" for item in image_cards.get("cards", [])])}
+"""
+    else:
+        image_sections = """
+## 图片/截图
+
+- 纯文案模式已启用：不抽关键帧、不 OCR、不生成截图、不生成图片卡片。
+"""
+    markdown = f"""# {platform_name}{'文章稿' if text_only else '图文稿'}
 
 ## 视频信息
 
@@ -187,17 +209,7 @@ def write_reports(
 
 {xhs_post.get("body") or ""}
 
-## 配图规划
-
-{_md_list([f"第 {item.get('page')} 页｜{item.get('role')}｜{item.get('caption')}｜来源：{_frame_anchor(item)}｜内容点：{item.get('content_point') or ''}" for item in image_plan])}
-
-## 图片提示词
-
-{_md_list([f"第 {item.get('page')} 页｜{item.get('caption')}｜参考：{item.get('visual_reference')}｜来源：{_frame_anchor(item)}｜提示词：{item.get('image_prompt')}｜负向：{item.get('negative_prompt')}" for item in image_prompts.get("image_prompts", [])])}
-
-## 图文卡片
-
-{_md_list([f"第 {item.get('page')} 页｜{item.get('role')}｜{item.get('title')}｜{item.get('caption')}｜来源：{_frame_anchor(item)}｜文件：{item.get('output_path')}" for item in image_cards.get("cards", [])])}
+{image_sections}
 
 ## 标签
 
@@ -209,8 +221,8 @@ def write_reports(
 - transcript：{paths.transcript_dir / "transcript.json"}
 - keyframes：{paths.analysis_dir / "keyframes.json"}
 - visual analysis：{paths.analysis_dir / "visual-analysis.json"}
-- frames：{paths.frames_dir}
-- cards：{cards_dir}
+- frames：{"纯文案模式已跳过" if text_only else paths.frames_dir}
+- cards：{"纯文案模式已跳过" if text_only else cards_dir}
 
 ## 来源时间点
 
@@ -347,8 +359,10 @@ def write_analysis_asset_package(
     paths: ProjectPaths,
     warnings: List[str],
 ) -> Dict[str, Any]:
+    text_only = content_assets.get("analysis_mode") == "text_only" or keyframes_payload.get("analysis_mode") == "text_only"
     asset_package = {
         "status": "analysis_completed",
+        "analysis_mode": "text_only" if text_only else "full",
         "metadata": metadata,
         "transcript": {
             "path": str(paths.transcript_dir / "transcript.json"),
@@ -368,7 +382,12 @@ def write_analysis_asset_package(
         "warnings": warnings,
         "next_step": {
             "action": "produce",
-            "description": "Review or edit content-assets.json, then run Produce to generate an original platform article. Run Generate Images after that to render PNG cards.",
+            "description": (
+                "Review or edit content-assets.json, then run Produce to generate an original platform article. "
+                "Text-only mode disables keyframes, OCR, screenshots, image prompts, and PNG cards."
+                if text_only
+                else "Review or edit content-assets.json, then run Produce to generate an original platform article. Run Generate Images after that to render PNG cards."
+            ),
         },
         "compliance": {
             "rights_boundary": "Only process public, owned, or authorized videos. Do not bypass login, paywall, DRM, or region restrictions.",

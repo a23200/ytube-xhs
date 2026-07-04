@@ -359,6 +359,33 @@ def test_analyze_endpoint_queues_analysis_pipeline(tmp_path, monkeypatch):
     project_id = response.json()["project_id"]
     assert called == [project_id]
     assert test_store.get(project_id).status == "created"
+    assert test_store.get(project_id).text_only is False
+
+
+def test_analyze_endpoint_persists_text_only_flag(tmp_path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(routes, "store", test_store)
+    called = []
+    monkeypatch.setattr(routes, "run_project_analysis_pipeline", lambda project_id: called.append(project_id))
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/projects/analyze",
+        json={
+            "url": "https://example.com/video",
+            "language": "zh",
+            "style": "干货",
+            "use_whisper": True,
+            "use_ocr": True,
+            "text_only": True,
+            "max_frames": 8,
+        },
+    )
+
+    assert response.status_code == 200
+    project_id = response.json()["project_id"]
+    assert called == [project_id]
+    assert test_store.get(project_id).text_only is True
 
 
 def test_produce_endpoint_requires_analysis_artifacts(tmp_path, monkeypatch):
@@ -570,6 +597,42 @@ def test_generate_images_endpoint_queues_when_xhs_artifacts_exist(tmp_path, monk
     assert called == [(project_id, "poster")]
     assert test_store.get(project_id).status == "rendering_cards"
     assert duplicate.status_code == 409
+
+
+def test_generate_images_rejects_text_only_project_before_artifact_checks(tmp_path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(routes, "store", test_store)
+    monkeypatch.setattr(routes, "run_project_pipeline", lambda project_id: None)
+    monkeypatch.setattr(routes, "run_project_image_generation_pipeline", lambda project_id, style="clean": None)
+    monkeypatch.setattr(routes, "run_project_toutiao_image_generation_pipeline", lambda project_id, style="clean": None)
+
+    client = TestClient(app)
+    create = client.post(
+        "/api/projects",
+        json={
+            "url": "https://example.com/video",
+            "language": "zh",
+            "style": "干货",
+            "use_whisper": True,
+            "text_only": True,
+            "max_frames": 8,
+        },
+    )
+    project_id = create.json()["project_id"]
+    test_store.set_status(project_id, ProjectStatus.xhs_completed, "text-only article ready")
+
+    status = client.get(f"/api/projects/{project_id}/status")
+    xhs_response = client.post(f"/api/projects/{project_id}/generate-images")
+    toutiao_response = client.post(f"/api/projects/{project_id}/generate-images/toutiao")
+
+    assert status.status_code == 200
+    assert status.json()["text_only"] is True
+    assert status.json()["can_generate_images"] is False
+    assert status.json()["routes"]["xhs"]["can_generate_images"] is False
+    assert xhs_response.status_code == 409
+    assert xhs_response.json()["detail"]["code"] == "text_only_image_generation_disabled"
+    assert toutiao_response.status_code == 409
+    assert toutiao_response.json()["detail"]["code"] == "text_only_image_generation_disabled"
 
 
 def test_toutiao_generate_images_endpoint_queues_when_artifacts_exist(tmp_path, monkeypatch):

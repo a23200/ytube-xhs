@@ -27,6 +27,7 @@ class ProjectCreate(BaseModel):
     style: str = Field(default="干货", max_length=32)
     use_whisper: bool = True
     use_ocr: bool = True
+    text_only: bool = False
     max_frames: int = Field(default=12, ge=8, le=20)
 
 
@@ -62,6 +63,7 @@ class ProjectRecord(BaseModel):
     style: str
     use_whisper: bool
     use_ocr: bool = True
+    text_only: bool = False
     max_frames: int
     status: ProjectStatus
     created_at: str

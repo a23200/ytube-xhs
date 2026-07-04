@@ -118,6 +118,29 @@ def _extract_frame(video_path: Path, timestamp: float, output_path: Path) -> Non
     )
 
 
+def write_skipped_keyframes(
+    metadata: Dict[str, Any],
+    transcript_payload: Dict[str, Any],
+    max_frames: int,
+    paths: ProjectPaths,
+    *,
+    reason: str,
+) -> Dict[str, Any]:
+    payload = {
+        "video_file": metadata.get("video_file"),
+        "duration": metadata.get("duration"),
+        "requested_max_frames": max_frames,
+        "transcript_segment_count": transcript_payload.get("segment_count") or len(transcript_payload.get("segments", []) or []),
+        "frame_count": 0,
+        "keyframes": [],
+        "skipped": True,
+        "skip_reason": reason,
+        "analysis_mode": "text_only",
+    }
+    write_json(paths.analysis_dir / "keyframes.json", payload)
+    return payload
+
+
 def extract_keyframes(
     metadata: Dict[str, Any],
     transcript_payload: Dict[str, Any],
@@ -127,17 +150,13 @@ def extract_keyframes(
     video_file = metadata.get("video_file")
     if not video_file or not Path(video_file).exists():
         if transcript_payload.get("segments"):
-            payload = {
-                "video_file": video_file,
-                "duration": metadata.get("duration"),
-                "requested_max_frames": max_frames,
-                "frame_count": 0,
-                "keyframes": [],
-                "skipped": True,
-                "skip_reason": "No video file is available; continuing with transcript-only analysis.",
-            }
-            write_json(paths.analysis_dir / "keyframes.json", payload)
-            return payload
+            return write_skipped_keyframes(
+                metadata,
+                transcript_payload,
+                max_frames,
+                paths,
+                reason="No video file is available; continuing with transcript-only analysis.",
+            )
         raise PipelineError(
             code="video_file_missing",
             message="No video file is available for keyframe extraction.",
