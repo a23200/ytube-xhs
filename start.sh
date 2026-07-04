@@ -58,7 +58,7 @@ print_urls() {
 }
 
 health_ok() {
-  "$HEALTHCHECK" --base-url "$BASE_URL" >/dev/null 2>&1
+  curl -fsS --max-time 5 "${BASE_URL}/api/health" >/dev/null 2>&1
 }
 
 wait_for_health() {
