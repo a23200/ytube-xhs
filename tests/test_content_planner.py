@@ -118,6 +118,26 @@ def test_build_content_assets_rejects_verbatim_source_claim(tmp_path: Path, monk
     assert not (paths.analysis_dir / "content-assets.json").exists()
 
 
+def test_build_content_assets_rewrites_verbatim_summary_on_second_llm_pass(tmp_path: Path, monkeypatch):
+    paths = _paths(tmp_path)
+    calls = []
+
+    def fake_json_chat(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            return _content_assets(one_sentence_summary=SOURCE_TEXT)
+        return _content_assets(one_sentence_summary="这段素材的价值在于提醒创作者先留证据，再发展自己的表达。")
+
+    monkeypatch.setattr(content_planner.llm_client, "json_chat", fake_json_chat)
+
+    payload = content_planner.build_content_assets({}, _transcript(), {"keyframes": []}, {"frames": []}, "zh", "干货", paths)
+
+    assert len(calls) == 2
+    assert payload["one_sentence_summary"].startswith("这段素材的价值")
+    assert payload["source_evidence"][0]["source_text"] == SOURCE_TEXT
+    assert read_json(paths.analysis_dir / "content-assets.json")["one_sentence_summary"].startswith("这段素材的价值")
+
+
 def test_build_content_assets_allows_source_text_in_evidence_fields(tmp_path: Path, monkeypatch):
     paths = _paths(tmp_path)
     monkeypatch.setattr(content_planner.llm_client, "json_chat", lambda *args, **kwargs: _content_assets())

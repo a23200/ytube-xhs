@@ -143,6 +143,27 @@ def test_write_xhs_post_rejects_verbatim_image_plan_copy(tmp_path: Path, monkeyp
     assert not (paths.analysis_dir / "xiaohongshu-post.json").exists()
 
 
+def test_write_xhs_post_rewrites_verbatim_body_on_second_llm_pass(tmp_path: Path, monkeypatch):
+    paths = ProjectPaths(tmp_path / "project")
+    paths.ensure()
+    copied_body = "这是一段来自原始字幕的很长连续文本，用来验证系统不会把原文直接搬到小红书正文里。"
+    calls = []
+
+    def fake_json_chat(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            return _valid_post(copied_body)
+        return _valid_post("先保存证据，再换成自己的判断和行动建议，这样内容才适合公开发布。")
+
+    monkeypatch.setattr(xhs_writer.llm_client, "json_chat", fake_json_chat)
+
+    payload = xhs_writer.write_xhs_post({}, _content_assets(), _keyframes(paths), {"frames": []}, "干货", paths)
+
+    assert len(calls) == 2
+    assert payload["body"].startswith("先保存证据")
+    assert read_json(paths.analysis_dir / "xiaohongshu-post.json")["body"].startswith("先保存证据")
+
+
 def test_write_xhs_post_allows_rewritten_copy(tmp_path: Path, monkeypatch):
     paths = ProjectPaths(tmp_path / "project")
     paths.ensure()

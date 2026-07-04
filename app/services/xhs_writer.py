@@ -67,6 +67,30 @@ PLATFORM_PROMPTS = {
 }
 
 
+def _post_schema() -> Dict[str, Any]:
+    return {
+        "content_type": "string",
+        "target_audience": ["string"],
+        "titles": ["至少 5 个中文标题"],
+        "cover_text": "string",
+        "hook": "string",
+        "body": "string, 手机阅读短段落，不逐字搬运字幕",
+        "image_plan": [
+            {
+                "page": "number",
+                "role": "cover|point|step|quote|summary",
+                "caption": "string",
+                "source_frame_time": "number|null",
+                "source_frame_path": "string|null",
+                "content_point": "string",
+            }
+        ],
+        "hashtags": ["string"],
+        "publish_suggestion": "string",
+        "source_disclaimer": "string",
+    }
+
+
 def _as_float(value: Any) -> Optional[float]:
     if value in (None, ""):
         return None
@@ -376,6 +400,115 @@ def _guard_against_verbatim_copy(payload: Dict[str, Any], content_assets: Dict[s
                 )
 
 
+def _post_context(
+    metadata: Dict[str, Any],
+    content_assets: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    style: str,
+) -> Dict[str, Any]:
+    return {
+        "metadata": {
+            "title": metadata.get("title"),
+            "author": metadata.get("author"),
+            "url": metadata.get("url"),
+            "duration": metadata.get("duration"),
+        },
+        "content_assets": _compact_content_assets_for_prompt(content_assets),
+        "keyframes": _compact_keyframes_for_prompt(keyframes_payload),
+        "visual_analysis": _compact_visual_for_prompt(visual_payload),
+        "style": style,
+    }
+
+
+def _validate_post_payload(
+    payload: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    paths: ProjectPaths,
+    *,
+    platform: str,
+) -> Dict[str, Any]:
+    payload = _normalize_post(payload, keyframes_payload, platform=platform)
+    payload = _repair_image_plan_anchors(payload, keyframes_payload)
+    require_frame_anchors = _has_frame_anchors(keyframes_payload)
+    payload = validate_xhs_post(payload, require_frame_anchors=require_frame_anchors)
+    if require_frame_anchors:
+        validate_xhs_post_anchors(payload, keyframes_payload, paths)
+    return payload
+
+
+def _rewrite_post_for_verbatim(
+    payload: Dict[str, Any],
+    metadata: Dict[str, Any],
+    content_assets: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    style: str,
+    platform: str,
+    violation: PipelineError,
+) -> Dict[str, Any]:
+    prompt = PLATFORM_PROMPTS.get(platform, PLATFORM_PROMPTS["xhs"])
+    return llm_client.json_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    f"你是{prompt['name']}原创稿版权安全审校。你会收到一个平台稿 JSON 草稿，其中部分可见字段"
+                    "逐字照搬了来源字幕或证据。请返回修复后的完整 JSON：保留事实、结构、标题数量、image_plan 页数、"
+                    "source_frame_time/source_frame_path 等锚点，但把标题、封面文案、开头、正文、图片 caption/content_point、"
+                    "发布建议等全部改成原创表达。不能连续照搬来源原文 24 个字符以上。不要新增无来源事实，返回严格 JSON。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "修复这个平台稿。重点修复 violation.field 指向的字段，并检查所有可见字段，确保不是字幕摘要或原文搬运。"
+                    "证据原文只允许存在于内部 content_assets.source_evidence/source_text，不要出现在可发布字段。"
+                    "\n\n"
+                    f"Schema:\n{json.dumps(_post_schema(), ensure_ascii=False)}\n\n"
+                    f"Violation:\n{json.dumps(violation.to_dict(), ensure_ascii=False)}\n\n"
+                    f"Context:\n{json.dumps(_post_context(metadata, content_assets, keyframes_payload, visual_payload, style), ensure_ascii=False)}\n\n"
+                    f"Draft JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+                ),
+            },
+        ],
+        step="writing_xhs",
+        temperature=0.2,
+    )
+
+
+def _guard_or_rewrite_post(
+    payload: Dict[str, Any],
+    metadata: Dict[str, Any],
+    content_assets: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    style: str,
+    paths: ProjectPaths,
+    *,
+    platform: str,
+) -> Dict[str, Any]:
+    try:
+        _guard_against_verbatim_copy(payload, content_assets)
+        return payload
+    except PipelineError as exc:
+        if exc.code != "verbatim_source_copy_detected":
+            raise
+        repaired = _rewrite_post_for_verbatim(
+            payload,
+            metadata,
+            content_assets,
+            keyframes_payload,
+            visual_payload,
+            style,
+            platform,
+            exc,
+        )
+        repaired = _validate_post_payload(repaired, keyframes_payload, paths, platform=platform)
+        _guard_against_verbatim_copy(repaired, content_assets)
+        return repaired
+
+
 def write_xhs_post(
     metadata: Dict[str, Any],
     content_assets: Dict[str, Any],
@@ -409,39 +542,8 @@ def _write_platform_post(
     platform: str,
 ) -> Dict[str, Any]:
     prompt = PLATFORM_PROMPTS.get(platform, PLATFORM_PROMPTS["xhs"])
-    schema = {
-        "content_type": "string",
-        "target_audience": ["string"],
-        "titles": ["至少 5 个中文标题"],
-        "cover_text": "string",
-        "hook": "string",
-        "body": "string, 手机阅读短段落，不逐字搬运字幕",
-        "image_plan": [
-            {
-                "page": "number",
-                "role": "cover|point|step|quote|summary",
-                "caption": "string",
-                "source_frame_time": "number|null",
-                "source_frame_path": "string|null",
-                "content_point": "string",
-            }
-        ],
-        "hashtags": ["string"],
-        "publish_suggestion": "string",
-        "source_disclaimer": "string",
-    }
-    context = {
-        "metadata": {
-            "title": metadata.get("title"),
-            "author": metadata.get("author"),
-            "url": metadata.get("url"),
-            "duration": metadata.get("duration"),
-        },
-        "content_assets": _compact_content_assets_for_prompt(content_assets),
-        "keyframes": _compact_keyframes_for_prompt(keyframes_payload),
-        "visual_analysis": _compact_visual_for_prompt(visual_payload),
-        "style": style,
-    }
+    schema = _post_schema()
+    context = _post_context(metadata, content_assets, keyframes_payload, visual_payload, style)
     try:
         payload = llm_client.json_chat(
             [
@@ -463,13 +565,17 @@ def _write_platform_post(
         )
     except PipelineError:
         raise
-    payload = _normalize_post(payload, keyframes_payload, platform=platform)
-    payload = _repair_image_plan_anchors(payload, keyframes_payload)
-    require_frame_anchors = _has_frame_anchors(keyframes_payload)
-    payload = validate_xhs_post(payload, require_frame_anchors=require_frame_anchors)
-    if require_frame_anchors:
-        validate_xhs_post_anchors(payload, keyframes_payload, paths)
-    _guard_against_verbatim_copy(payload, content_assets)
+    payload = _validate_post_payload(payload, keyframes_payload, paths, platform=platform)
+    payload = _guard_or_rewrite_post(
+        payload,
+        metadata,
+        content_assets,
+        keyframes_payload,
+        visual_payload,
+        style,
+        paths,
+        platform=platform,
+    )
     if "source_disclaimer" not in payload:
         payload["source_disclaimer"] = "本稿基于公开视频/授权视频的信息进行二次创作，保留来源与时间点用于追溯。"
     write_json(paths.analysis_dir / str(prompt["output_filename"]), payload)

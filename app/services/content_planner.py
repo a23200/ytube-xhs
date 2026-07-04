@@ -30,6 +30,67 @@ def _normalize_content_assets(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _content_assets_schema() -> Dict[str, Any]:
+    return {
+        "one_sentence_summary": "string",
+        "core_points": [
+            {
+                "point": "string",
+                "why_it_matters": "string",
+                "evidence": [
+                    {
+                        "type": "transcript|keyframe|ocr",
+                        "time": "number, required unless frame_path is provided",
+                        "frame_path": "string|null",
+                        "text": "string",
+                    }
+                ],
+            }
+        ],
+        "golden_quotes": [{"quote": "string", "time": "number|null", "rewrite_note": "string"}],
+        "chapters": [{"title": "string", "start": "number|null", "end": "number|null", "summary": "string"}],
+        "steps": [{"step": "string", "evidence_time": "number|null"}],
+        "audience": ["string"],
+        "pain_points": ["string"],
+        "xiaohongshu_angles": ["string"],
+        "recommended_content_type": "string",
+        "source_evidence": [
+            {
+                "claim": "string",
+                "source_type": "string",
+                "time": "number, required unless source_path is provided",
+                "source_path": "string|null",
+                "source_text": "string",
+            }
+        ],
+    }
+
+
+def _content_assets_context(
+    metadata: Dict[str, Any],
+    transcript_payload: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    language: str,
+    style: str,
+) -> Dict[str, Any]:
+    return {
+        "metadata": {
+            "video_id": metadata.get("video_id"),
+            "url": metadata.get("url"),
+            "title": metadata.get("title"),
+            "author": metadata.get("author"),
+            "description": metadata.get("description"),
+            "duration": metadata.get("duration"),
+        },
+        "transcript_segments": _compact_transcript(transcript_payload),
+        "keyframes": keyframes_payload.get("keyframes", []),
+        "visual_analysis": visual_payload,
+        "style": style,
+        "language": language,
+    }
+
+
 def _contains_long_verbatim(source: str, generated: str, min_chars: int = MIN_VERBATIM_CHARS) -> str:
     source = clean_text(source)
     generated = clean_text(generated)
@@ -125,6 +186,90 @@ def _guard_against_verbatim_copy(payload: Dict[str, Any], transcript_payload: Di
                     step="planning_content",
                     details={"matched_fragment": match, "field": field, "min_chars": MIN_VERBATIM_CHARS},
                 )
+
+
+def _validate_content_assets_payload(
+    payload: Dict[str, Any],
+    transcript_payload: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    paths: ProjectPaths,
+) -> Dict[str, Any]:
+    payload = _normalize_content_assets(payload)
+    payload = validate_content_assets(payload)
+    validate_content_asset_anchors(payload, transcript_payload, keyframes_payload, paths)
+    return payload
+
+
+def _rewrite_content_assets_for_verbatim(
+    payload: Dict[str, Any],
+    transcript_payload: Dict[str, Any],
+    metadata: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    language: str,
+    style: str,
+    violation: PipelineError,
+) -> Dict[str, Any]:
+    """Ask the LLM to repair only generated fields after a verbatim-copy hit."""
+
+    return llm_client.json_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "你是版权安全改写审校。你会收到一个 content-assets.json 草稿，其中某些可发布/可展示字段"
+                    "逐字照搬了原字幕。请返回修复后的完整 JSON：保留事实、时间点、证据字段和结构，但把所有生成字段"
+                    "改成原创中文表达。source_evidence.source_text 与 core_points.evidence.text 可以保留原文作为证据；"
+                    "除此之外，任何字段都不能连续照搬原文 24 个字符以上。不要新增无来源事实，返回严格 JSON。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "修复这个 content-assets.json 草稿。重点修复 violation.field 指向的字段，并顺手检查所有标题、总结、"
+                    "观点、金句、步骤、受众、痛点、角度和 claim，确保它们都是改写后的原创表达；原文只允许留在 evidence/source_text。"
+                    "\n\n"
+                    f"Schema:\n{json.dumps(_content_assets_schema(), ensure_ascii=False)}\n\n"
+                    f"Violation:\n{json.dumps(violation.to_dict(), ensure_ascii=False)}\n\n"
+                    f"Original context:\n{json.dumps(_content_assets_context(metadata, transcript_payload, keyframes_payload, visual_payload, language, style), ensure_ascii=False)}\n\n"
+                    f"Draft JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+                ),
+            },
+        ],
+        step="planning_content",
+        temperature=0.15,
+    )
+
+
+def _guard_or_rewrite_content_assets(
+    payload: Dict[str, Any],
+    transcript_payload: Dict[str, Any],
+    metadata: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    language: str,
+    style: str,
+    paths: ProjectPaths,
+) -> Dict[str, Any]:
+    try:
+        _guard_against_verbatim_copy(payload, transcript_payload)
+        return payload
+    except PipelineError as exc:
+        if exc.code != "verbatim_source_copy_detected":
+            raise
+        repaired = _rewrite_content_assets_for_verbatim(
+            payload,
+            transcript_payload,
+            metadata,
+            keyframes_payload,
+            visual_payload,
+            language,
+            style,
+            exc,
+        )
+        repaired = _validate_content_assets_payload(repaired, transcript_payload, keyframes_payload, paths)
+        _guard_against_verbatim_copy(repaired, transcript_payload)
+        return repaired
 
 
 def _first_transcript_segment(transcript_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -307,54 +452,8 @@ def build_content_assets(
     style: str,
     paths: ProjectPaths,
 ) -> Dict[str, Any]:
-    context = {
-        "metadata": {
-            "video_id": metadata.get("video_id"),
-            "url": metadata.get("url"),
-            "title": metadata.get("title"),
-            "author": metadata.get("author"),
-            "description": metadata.get("description"),
-            "duration": metadata.get("duration"),
-        },
-        "transcript_segments": _compact_transcript(transcript_payload),
-        "keyframes": keyframes_payload.get("keyframes", []),
-        "visual_analysis": visual_payload,
-        "style": style,
-        "language": language,
-    }
-    schema = {
-        "one_sentence_summary": "string",
-        "core_points": [
-            {
-                "point": "string",
-                "why_it_matters": "string",
-                "evidence": [
-                    {
-                        "type": "transcript|keyframe|ocr",
-                        "time": "number, required unless frame_path is provided",
-                        "frame_path": "string|null",
-                        "text": "string",
-                    }
-                ],
-            }
-        ],
-        "golden_quotes": [{"quote": "string", "time": "number|null", "rewrite_note": "string"}],
-        "chapters": [{"title": "string", "start": "number|null", "end": "number|null", "summary": "string"}],
-        "steps": [{"step": "string", "evidence_time": "number|null"}],
-        "audience": ["string"],
-        "pain_points": ["string"],
-        "xiaohongshu_angles": ["string"],
-        "recommended_content_type": "string",
-        "source_evidence": [
-            {
-                "claim": "string",
-                "source_type": "string",
-                "time": "number, required unless source_path is provided",
-                "source_path": "string|null",
-                "source_text": "string",
-            }
-        ],
-    }
+    context = _content_assets_context(metadata, transcript_payload, keyframes_payload, visual_payload, language, style)
+    schema = _content_assets_schema()
     payload = llm_client.json_chat(
         [
             {
@@ -383,10 +482,17 @@ def build_content_assets(
         step="planning_content",
         temperature=0.2,
     )
-    payload = _normalize_content_assets(payload)
-    payload = validate_content_assets(payload)
-    validate_content_asset_anchors(payload, transcript_payload, keyframes_payload, paths)
-    _guard_against_verbatim_copy(payload, transcript_payload)
+    payload = _validate_content_assets_payload(payload, transcript_payload, keyframes_payload, paths)
+    payload = _guard_or_rewrite_content_assets(
+        payload,
+        transcript_payload,
+        metadata,
+        keyframes_payload,
+        visual_payload,
+        language,
+        style,
+        paths,
+    )
     payload["source_metadata"] = {
         "url": metadata.get("url"),
         "title": metadata.get("title"),
