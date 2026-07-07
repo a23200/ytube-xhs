@@ -423,6 +423,53 @@ def test_ingest_text_only_downloads_audio_only_when_no_subtitles(tmp_path: Path,
     assert not list(paths.source_dir.glob("*.mp4"))
 
 
+def test_ingest_text_only_audio_format_unavailable_uses_android_media_fallback(tmp_path: Path, monkeypatch):
+    paths = ingest.ProjectPaths(tmp_path / "project")
+    paths.ensure()
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_file", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_from_browser", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_impersonate", None)
+    monkeypatch.setattr(ingest, "_download_thumbnail", lambda url, output_path: None)
+    FakeYoutubeDL.calls = 0
+    FakeYoutubeDL.seen_opts_history = []
+
+    class SequenceYoutubeDL(FakeYoutubeDL):
+        def __init__(self, opts):
+            super().__init__(opts)
+            self.opts = opts
+
+        def extract_info(self, url, download=True):
+            FakeYoutubeDL.calls += 1
+            if FakeYoutubeDL.calls == 2:
+                raise RuntimeError("ERROR: [youtube] mcTAHffEkIw: Requested format is not available. Use --list-formats for a list of available formats")
+            if FakeYoutubeDL.calls == 3:
+                (paths.source_dir / "mcTAHffEkIw.mp4").write_bytes(b"video")
+            return {
+                "id": "mcTAHffEkIw",
+                "webpage_url": url,
+                "title": "Format fallback text mode",
+                "uploader": "source",
+                "duration": 1800,
+                "subtitles": {},
+                "automatic_captions": {},
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=SequenceYoutubeDL))
+
+    metadata = ingest.ingest_video("https://www.youtube.com/watch?v=mcTAHffEkIw", "zh", paths, prefer_subtitles_only=True)
+
+    assert FakeYoutubeDL.calls == 3
+    assert metadata["video_file"] == str(paths.source_dir / "mcTAHffEkIw.mp4")
+    assert metadata["audio_file"] is None
+    assert "smallest available media fallback" in metadata["ingest_warnings"][-1]
+    audio_opts = FakeYoutubeDL.seen_opts_history[1]
+    android_opts = FakeYoutubeDL.seen_opts_history[2]
+    assert audio_opts["format"] == "ba[abr<=64]/ba/bestaudio/best"
+    assert android_opts["extractor_args"]["youtube"]["player_client"] == ["android"]
+    assert android_opts["format"] == "18/best[height<=360]/best"
+    assert android_opts["writesubtitles"] is False
+
+
 def test_ingest_reports_youtube_tls_network_failure_separately(tmp_path: Path, monkeypatch):
     paths = ingest.ProjectPaths(tmp_path / "project")
     paths.ensure()

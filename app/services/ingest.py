@@ -346,6 +346,69 @@ def _audio_only_opts(output_template: str, language: str) -> Dict[str, Any]:
     )
 
 
+def _write_text_only_media_fallback_metadata(
+    info: Dict[str, Any],
+    paths: ProjectPaths,
+    *,
+    video_path: Optional[Path],
+    audio_path: Optional[Path],
+    subtitle_path: Optional[Path],
+    ingest_warnings: list[str],
+    reason: str,
+) -> Dict[str, Any]:
+    return _write_metadata(
+        info,
+        paths,
+        video_path=video_path,
+        subtitle_path=subtitle_path,
+        audio_path=audio_path,
+        thumbnail_from_video=False,
+        ingest_warnings=[
+            *ingest_warnings,
+            (
+                f"Text-only analysis mode could not use subtitles/audio-only directly ({reason}), so it downloaded "
+                "the smallest available media fallback for Whisper transcription only. Keyframes, OCR, screenshots, "
+                "and image-card generation remain disabled for this run."
+            ),
+        ],
+    )
+
+
+def _download_text_only_android_fallback(
+    yt_dlp_module: Any,
+    url: str,
+    language: str,
+    paths: ProjectPaths,
+    output_template: str,
+    subtitle_path: Optional[Path],
+    ingest_warnings: list[str],
+    reason: str,
+) -> Dict[str, Any]:
+    fallback_opts = _public_android_fallback_opts(output_template, language)
+    with yt_dlp_module.YoutubeDL(fallback_opts) as ydl:
+        fallback_info = _normalize_info(ydl.extract_info(url, download=True), url)
+    video_id = fallback_info.get("id")
+    audio_path = _find_downloaded_audio(paths.source_dir, video_id)
+    video_path = _find_downloaded_video(paths.source_dir, video_id)
+    subtitle_path = _find_downloaded_subtitle(paths.source_dir, video_id) or subtitle_path
+    if not audio_path and not video_path:
+        raise PipelineError(
+            code="media_file_missing",
+            message="yt-dlp text-only Android fallback completed but no media file was found.",
+            step="ingest",
+            details={"source_dir": str(paths.source_dir), "video_id": video_id},
+        )
+    return _write_text_only_media_fallback_metadata(
+        fallback_info,
+        paths,
+        video_path=video_path,
+        audio_path=audio_path,
+        subtitle_path=subtitle_path,
+        ingest_warnings=ingest_warnings,
+        reason=reason,
+    )
+
+
 def _normalize_info(info: Any, url: str) -> Dict[str, Any]:
     if not info:
         raise PipelineError(
@@ -499,7 +562,18 @@ def ingest_video(
                 audio_info = _normalize_info(ydl.extract_info(url, download=True), url)
             video_id = audio_info.get("id")
             audio_path = _find_downloaded_audio(paths.source_dir, video_id)
+            video_path = _find_downloaded_video(paths.source_dir, video_id)
             subtitle_path = _find_downloaded_subtitle(paths.source_dir, video_id) or subtitle_path
+            if not audio_path and video_path:
+                return _write_text_only_media_fallback_metadata(
+                    audio_info,
+                    paths,
+                    video_path=video_path,
+                    audio_path=None,
+                    subtitle_path=subtitle_path,
+                    ingest_warnings=ingest_warnings,
+                    reason="audio-only selector produced a media file instead of a standalone audio file",
+                )
             if not audio_path:
                 raise PipelineError(
                     code="audio_file_missing",
@@ -523,10 +597,32 @@ def ingest_video(
                     ),
                 ],
             )
-        except PipelineError:
-            raise
+        except PipelineError as exc:
+            if exc.code != "audio_file_missing":
+                raise
+            return _download_text_only_android_fallback(
+                yt_dlp,
+                url,
+                language,
+                paths,
+                output_template,
+                subtitle_path,
+                ingest_warnings,
+                exc.message,
+            )
         except Exception as exc:
             message = str(exc)
+            if _should_try_public_android_fallback(message):
+                return _download_text_only_android_fallback(
+                    yt_dlp,
+                    url,
+                    language,
+                    paths,
+                    output_template,
+                    subtitle_path,
+                    ingest_warnings,
+                    message,
+                )
             _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
 
     ydl_opts = _base_ydl_opts(output_template, language, download=True)
