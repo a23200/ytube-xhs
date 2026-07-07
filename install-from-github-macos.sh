@@ -13,6 +13,7 @@ SKIP_HOMEBREW_INSTALL="${YTXHS_SKIP_HOMEBREW_INSTALL:-0}"
 NO_WHISPER="${YTXHS_NO_WHISPER:-0}"
 WITH_PADDLEOCR="${YTXHS_WITH_PADDLEOCR:-0}"
 KEEP_DOWNLOAD="${YTXHS_KEEP_DOWNLOAD:-0}"
+NO_BOOTCHECK="${YTXHS_NO_BOOTCHECK:-0}"
 
 usage() {
   cat <<'EOF'
@@ -34,6 +35,7 @@ Options:
   --skip-homebrew-install Do not try to install Homebrew when it is missing
   --no-whisper           Do not install faster-whisper
   --with-paddleocr       Install PaddleOCR Python package
+  --no-bootcheck         Do not install boot-time health/self-heal LaunchDaemon
   --keep-download        Keep downloaded source directory under /tmp
   -h, --help             Show help
 
@@ -41,7 +43,7 @@ Recommended fixed updater:
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 
 Direct installer example:
-  YTXHS_REF=macmini-v20260707.4 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260707.4/install-from-github-macos.sh)"
+  YTXHS_REF=macmini-v20260707.5 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260707.5/install-from-github-macos.sh)"
 
 Private repository fallback:
   If this repository is private again later, set GH_TOKEN or authenticate gh CLI
@@ -96,6 +98,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --with-paddleocr)
       WITH_PADDLEOCR=1
+      shift
+      ;;
+    --no-bootcheck)
+      NO_BOOTCHECK=1
       shift
       ;;
     --keep-download)
@@ -261,6 +267,9 @@ if [ "$NO_WHISPER" = "1" ]; then
 fi
 if [ "$WITH_PADDLEOCR" = "1" ]; then
   INSTALL_ARGS+=(--with-paddleocr)
+fi
+if [ "$NO_BOOTCHECK" = "1" ]; then
+  INSTALL_ARGS+=(--no-bootcheck)
 fi
 
 echo "Running local installer from downloaded source..."

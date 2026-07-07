@@ -41,6 +41,7 @@ Options:
   --skip-homebrew-install Forwarded to installer
   --no-whisper           Forwarded to installer
   --with-paddleocr       Forwarded to installer
+  --no-bootcheck         Forwarded to installer
   --keep-download        Forwarded to installer
   -h, --help             Show help
 
@@ -49,7 +50,7 @@ Examples:
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 
   # Deploy a frozen tag through the same fixed updater:
-  YTXHS_REF=macmini-v20260707.4 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
+  YTXHS_REF=macmini-v20260707.5 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 USAGE
 }
 
@@ -99,7 +100,7 @@ while [ "$#" -gt 0 ]; do
       POST_ACTION="none"
       shift
       ;;
-    --skip-brew|--skip-homebrew-install|--no-whisper|--with-paddleocr|--keep-download)
+    --skip-brew|--skip-homebrew-install|--no-whisper|--with-paddleocr|--no-bootcheck|--keep-download)
       PASSTHROUGH+=("$1")
       shift
       ;;

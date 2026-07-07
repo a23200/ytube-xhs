@@ -8,12 +8,14 @@ APP_DIR="/opt/ytube-xhs"
 HOST="0.0.0.0"
 PORT="8012"
 LABEL="com.ytube-xhs.service"
+BOOTCHECK_LABEL="com.ytube-xhs.bootcheck"
 SERVICE_USER="${SUDO_USER:-$(id -un)}"
 SERVICE_GROUP=""
 LAUNCHD_MODE="daemon"
 INSTALL_WHISPER=1
 INSTALL_PADDLEOCR=0
 INSTALL_BREW_PACKAGES=1
+INSTALL_BOOTCHECK=1
 
 usage() {
   cat <<'EOF'
@@ -29,6 +31,7 @@ Options:
   --with-paddleocr        Install PaddleOCR Python package; PaddlePaddle runtime may still be required
   --skip-brew             Do not install Homebrew packages
   --skip-homebrew-install Accepted for bootstrap compatibility; Homebrew install happens before sudo
+  --no-bootcheck          Do not install the boot-time health/self-heal LaunchDaemon
   -h, --help              Show help
 
 Recommended production command:
@@ -75,6 +78,10 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --skip-homebrew-install)
+      shift
+      ;;
+    --no-bootcheck)
+      INSTALL_BOOTCHECK=0
       shift
       ;;
     -h|--help)
@@ -273,6 +280,56 @@ PY
   echo "Desktop launcher: $launcher"
 }
 
+install_bootcheck_daemon() {
+  if [ "$INSTALL_BOOTCHECK" -ne 1 ]; then
+    echo "Skipping bootcheck LaunchDaemon because --no-bootcheck was passed."
+    return 0
+  fi
+  if [ "$LAUNCHD_MODE" != "daemon" ]; then
+    echo "Skipping bootcheck LaunchDaemon for launchd mode: $LAUNCHD_MODE"
+    return 0
+  fi
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "Skipping bootcheck LaunchDaemon because installer is not running as root." >&2
+    return 0
+  fi
+
+  local template plist_tmp plist_dest
+  template="$APP_DIR/deploy/macos/com.ytube-xhs.bootcheck.plist.template"
+  plist_tmp="$APP_DIR/runtime/${BOOTCHECK_LABEL}.plist"
+  plist_dest="/Library/LaunchDaemons/${BOOTCHECK_LABEL}.plist"
+
+  if [ ! -f "$template" ]; then
+    echo "Bootcheck plist template is missing: $template" >&2
+    return 1
+  fi
+
+  python3 - "$template" "$plist_tmp" "$APP_DIR" "$PORT" <<'PY'
+import sys
+
+template_path, output_path, app_dir, port = sys.argv[1:5]
+text = open(template_path, "r", encoding="utf-8").read()
+text = text.replace("__APP_DIR__", app_dir)
+text = text.replace("__PORT__", port)
+open(output_path, "w", encoding="utf-8").write(text)
+PY
+
+  cp "$plist_tmp" "$plist_dest"
+  chown root:wheel "$plist_dest"
+  chmod 644 "$plist_dest"
+  plutil -lint "$plist_dest"
+
+  if launchctl print "system/${BOOTCHECK_LABEL}" >/dev/null 2>&1; then
+    launchctl bootout "system/${BOOTCHECK_LABEL}" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  launchctl bootout system "$plist_dest" >/dev/null 2>&1 || true
+  launchctl bootstrap system "$plist_dest"
+  launchctl enable "system/${BOOTCHECK_LABEL}"
+  launchctl kickstart -k "system/${BOOTCHECK_LABEL}" || true
+  echo "Bootcheck LaunchDaemon: $plist_dest"
+}
+
 echo "Installing ytube-xhs"
 echo "  source:       $SOURCE_DIR"
 echo "  app dir:      $APP_DIR"
@@ -399,6 +456,7 @@ PY
 fi
 
 install_desktop_launcher
+install_bootcheck_daemon
 
 echo
 echo "Install complete."
@@ -406,6 +464,7 @@ echo "Open:    http://<mac-mini-ip>:${PORT}"
 echo "Desktop: ~/Desktop/启动 ytube-xhs.command"
 echo "Start:   $APP_DIR/start.sh"
 echo "Restart: $APP_DIR/start.sh restart"
+echo "Bootcheck: /Library/LaunchDaemons/${BOOTCHECK_LABEL}.plist"
 echo "Manage:  $APP_DIR/deploy/macos/manage.sh status"
 echo "Logs:    $APP_DIR/deploy/macos/manage.sh logs"
 echo "Health:  YTXHS_PORT=${PORT} $APP_DIR/deploy/macos/healthcheck.sh --llm"

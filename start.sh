@@ -19,6 +19,7 @@ Commands:
   restart   Force restart service and wait until healthy.
   status    Print service status and access URLs.
   health    Run HTTP healthcheck only.
+  bootcheck Run dependency/startup self-heal check.
   logs      Tail service logs.
 
 Environment:
@@ -119,6 +120,9 @@ case "$cmd" in
   health)
     "$HEALTHCHECK" --base-url "$BASE_URL"
     print_urls
+    ;;
+  bootcheck)
+    "$APP_DIR/deploy/macos/bootcheck.sh"
     ;;
   logs)
     "$MANAGE" logs

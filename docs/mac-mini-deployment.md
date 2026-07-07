@@ -42,7 +42,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/up
 ```bash
 export YTXHS_PORT="8012"
 export YTXHS_APP_DIR="/opt/ytube-xhs"
-YTXHS_REF=macmini-v20260707.4 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
+YTXHS_REF=macmini-v20260707.5 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 ```
 
 固定更新脚本会自动下载 GitHub 源码包，再调用项目内 `deploy/macos/install_macos.sh` 完成本地依赖、虚拟环境和 launchd 服务安装；已有 `.env` 与 `runtime/` 不会被覆盖。
@@ -93,7 +93,8 @@ sudo deploy/macos/install_macos.sh \
 - 安装/检查 `ffmpeg`、`tesseract`、`tesseract-lang`
 - 创建 `/opt/ytube-xhs/.env`
 - 创建 `runtime/logs`
-- 注册 `launchd` 服务 `com.ytube-xhs.service`
+- 注册主服务 LaunchDaemon：`com.ytube-xhs.service`，开机自启并异常退出自动拉起
+- 注册启动自检/自恢复 LaunchDaemon：`com.ytube-xhs.bootcheck`，开机和每 5 分钟检查依赖、拉起服务、健康检查，失败时自动重启服务
 
 默认 OCR 使用 Homebrew `tesseract`，不默认安装 PaddleOCR。若后续确实需要 PaddleOCR，可重新运行安装脚本时增加 `--with-paddleocr`，并按 PaddlePaddle 官方要求安装匹配 runtime。
 
@@ -182,17 +183,23 @@ http://<Mac-mini-IP>:8012
 /opt/ytube-xhs/start.sh              # 服务正常则输出访问地址；不正常则自动启动
 /opt/ytube-xhs/start.sh restart      # 强制重启并等待健康检查
 /opt/ytube-xhs/start.sh status       # 查看 launchd 状态、HTTP 健康和访问地址
+/opt/ytube-xhs/start.sh bootcheck    # 手动执行开机同款依赖/健康/自恢复检查
 sudo /opt/ytube-xhs/deploy/macos/manage.sh status
 sudo /opt/ytube-xhs/deploy/macos/manage.sh restart
 sudo /opt/ytube-xhs/deploy/macos/manage.sh logs
+sudo /opt/ytube-xhs/deploy/macos/manage.sh bootcheck
 sudo /opt/ytube-xhs/deploy/macos/manage.sh recover
 ```
+
+如果确实要临时停服，使用 `sudo /opt/ytube-xhs/deploy/macos/manage.sh stop`；它会暂停 bootcheck 自动拉起，直到再次执行 `start` 或 `restart`。
 
 日志位置：
 
 ```text
 /opt/ytube-xhs/runtime/logs/uvicorn.out.log
 /opt/ytube-xhs/runtime/logs/uvicorn.err.log
+/opt/ytube-xhs/runtime/logs/bootcheck.out.log
+/opt/ytube-xhs/runtime/logs/bootcheck.err.log
 ```
 
 项目产物：
@@ -203,7 +210,7 @@ sudo /opt/ytube-xhs/deploy/macos/manage.sh recover
 
 ## 8. 防故障建议
 
-1. 用 `launchd` 托管，不用手动终端常驻。
+1. 用 `launchd` 托管，不用手动终端常驻；默认同时安装主服务和 bootcheck 自恢复守护。
 2. 定期执行：
 
 ```bash

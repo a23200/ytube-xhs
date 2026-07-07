@@ -185,6 +185,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/up
 ```
 
 以后更新仍执行同一条固定命令；默认部署 GitHub `main` 上的最新可用版本，并保留 `/opt/ytube-xhs/.env` 与 `runtime/`。
+安装会注册主服务 `com.ytube-xhs.service` 和启动自检守护 `com.ytube-xhs.bootcheck`，开机后自动拉起服务并做依赖/健康检查。
 
 或者生成离线部署包：
 
@@ -206,6 +207,7 @@ sudo deploy/macos/install_macos.sh --app-dir /opt/ytube-xhs --port 8012 --servic
 /opt/ytube-xhs/start.sh
 /opt/ytube-xhs/start.sh restart
 /opt/ytube-xhs/start.sh status
+/opt/ytube-xhs/start.sh bootcheck
 ```
 
 终端同步运行一个真实任务：
