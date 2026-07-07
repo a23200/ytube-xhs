@@ -40,7 +40,7 @@ def test_settings_invalid_int_env_uses_default(monkeypatch):
     monkeypatch.setenv("XHS_LLM_TIMEOUT_MS", "not-an-int")
     settings = Settings()
 
-    assert settings.llm_timeout_ms == 60000
+    assert settings.llm_timeout_ms == 90000
 
 
 def test_relative_runtime_dir_is_resolved_from_project_root(monkeypatch):
