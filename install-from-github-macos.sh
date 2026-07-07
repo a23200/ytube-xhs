@@ -37,8 +37,11 @@ Options:
   --keep-download        Keep downloaded source directory under /tmp
   -h, --help             Show help
 
-Remote one-liner example:
-  YTXHS_REF=macmini-v20260704.8 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.8/install-from-github-macos.sh)"
+Recommended fixed updater:
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
+
+Direct installer example:
+  YTXHS_REF=macmini-v20260707.4 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260707.4/install-from-github-macos.sh)"
 
 Private repository fallback:
   If this repository is private again later, set GH_TOKEN or authenticate gh CLI

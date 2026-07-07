@@ -178,11 +178,13 @@ API 文档：
 
 如果要在另一台 Mac mini 上独立运行，不依赖 Codex 或开发机，请使用部署包和 `launchd` 方案：
 
-从 GitHub 公开仓库一键安装：
+从 GitHub 公开仓库一键安装 / 后续固定更新：
 
 ```bash
-YTXHS_REF=macmini-v20260704.8 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.8/install-from-github-macos.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 ```
+
+以后更新仍执行同一条固定命令；默认部署 GitHub `main` 上的最新可用版本，并保留 `/opt/ytube-xhs/.env` 与 `runtime/`。
 
 或者生成离线部署包：
 

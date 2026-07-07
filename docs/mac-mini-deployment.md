@@ -17,12 +17,12 @@ brew --version
 
 ## 2. 一键安装方式 A：从公开 GitHub 下载项目本体
 
-这是推荐方式：项目本体上传到公开 GitHub 仓库，Mac mini 只需要一条命令即可下载项目源码并完成本地部署。
+这是推荐方式：项目本体上传到公开 GitHub 仓库，Mac mini 只需要一条固定命令即可下载项目源码并完成本地部署。以后升级也执行同一条命令。
 
 在 Mac mini 上：
 
 ```bash
-YTXHS_REF=macmini-v20260704.8 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.8/install-from-github-macos.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 ```
 
 默认安装到：
@@ -42,10 +42,10 @@ YTXHS_REF=macmini-v20260704.8 bash -c "$(curl -fsSL https://raw.githubuserconten
 ```bash
 export YTXHS_PORT="8012"
 export YTXHS_APP_DIR="/opt/ytube-xhs"
-YTXHS_REF=macmini-v20260704.8 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.8/install-from-github-macos.sh)"
+YTXHS_REF=macmini-v20260707.4 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 ```
 
-脚本会自动下载 GitHub 源码包，再调用项目内 `deploy/macos/install_macos.sh` 完成本地依赖、虚拟环境和 launchd 服务安装。
+固定更新脚本会自动下载 GitHub 源码包，再调用项目内 `deploy/macos/install_macos.sh` 完成本地依赖、虚拟环境和 launchd 服务安装；已有 `.env` 与 `runtime/` 不会被覆盖。
 
 如果以后仓库改回 private，脚本仍支持设置 `GH_TOKEN` 或使用已登录的 `gh` CLI 下载源码包。
 
@@ -229,7 +229,7 @@ tar -czf ~/ytube-xhs-runtime-$(date +%Y%m%d).tar.gz -C /opt/ytube-xhs runtime
 GitHub 方式：
 
 ```bash
-YTXHS_REF=macmini-v20260704.8 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/macmini-v20260704.8/install-from-github-macos.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 sudo /opt/ytube-xhs/deploy/macos/manage.sh self-test
 ```
 
