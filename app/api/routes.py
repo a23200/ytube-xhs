@@ -146,6 +146,63 @@ STATUS_UI: dict[str, dict[str, Any]] = {
     },
 }
 
+PLATFORM_STATUS_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
+    "toutiao": {
+        "producing_article": {
+            "label": "生成今日头条稿",
+            "description": "正在根据已确认解析生成今日头条标题、正文和配图计划。",
+            "outputs": ["toutiao_post_json", "toutiao_image_prompts"],
+        },
+        "rendering_cards": {
+            "label": "渲染今日头条卡片",
+            "description": "正在把今日头条文章和关键帧渲染成 PNG 卡片。",
+            "outputs": ["toutiao_image_cards"],
+        },
+        "completed": {
+            "outputs": [
+                "metadata",
+                "transcript",
+                "keyframes",
+                "visual_analysis",
+                "content_assets",
+                "toutiao_post_json",
+                "toutiao_post_md",
+                "toutiao_image_prompts",
+                "toutiao_image_cards",
+                "asset_package",
+                "run_metadata",
+            ],
+        },
+    },
+    "xhs": {
+        "producing_article": {
+            "label": "生成小红书稿",
+            "description": "正在根据已确认解析生成小红书标题、正文、标签和配图计划。",
+            "outputs": ["xhs_post_json", "image_prompts"],
+        },
+        "rendering_cards": {
+            "label": "渲染图文卡片",
+            "description": "正在把小红书文章和关键帧渲染成竖版 PNG 卡片。",
+            "outputs": ["image_cards"],
+        },
+        "completed": {
+            "outputs": [
+                "metadata",
+                "transcript",
+                "keyframes",
+                "visual_analysis",
+                "content_assets",
+                "xhs_post_json",
+                "xhs_post_md",
+                "image_prompts",
+                "image_cards",
+                "asset_package",
+                "run_metadata",
+            ],
+        },
+    },
+}
+
 ANALYZE_FLOW = ["created", "ingesting", "transcribing", "extracting_frames", "analyzing_visuals", "planning_content", "analysis_completed"]
 PRODUCE_FLOW = ["producing_article", "xhs_completed"]
 TOUTIAO_PRODUCE_FLOW = ["producing_article", "toutiao_completed"]
@@ -327,6 +384,70 @@ def _status_value(value: Any) -> str:
     return getattr(value, "value", str(value))
 
 
+def _platform_from_details(value: Any) -> Optional[str]:
+    if not isinstance(value, dict):
+        return None
+    platform = value.get("platform")
+    if platform in {"xhs", "toutiao"}:
+        return str(platform)
+    nested = value.get("details")
+    if isinstance(nested, dict):
+        return _platform_from_details(nested)
+    return None
+
+
+def _message_platform(message: Any) -> Optional[str]:
+    text = str(message or "")
+    if "Toutiao" in text or "今日头条" in text:
+        return "toutiao"
+    if "Xiaohongshu" in text or "XHS" in text or "小红书" in text:
+        return "xhs"
+    return None
+
+
+def _last_logged_platform(record: Any) -> Optional[str]:
+    error_platform = _platform_from_details(record.error)
+    if _status_value(record.status) == "failed" and error_platform:
+        return error_platform
+    for log in reversed(record.logs):
+        platform = _platform_from_details(getattr(log, "details", None)) or _message_platform(getattr(log, "message", ""))
+        if platform:
+            return platform
+    return error_platform
+
+
+def _record_platform(record: Any) -> str:
+    status = _status_value(record.status)
+    if status == "toutiao_completed":
+        return "toutiao"
+    if status == "xhs_completed":
+        return "xhs"
+
+    logged_platform = _last_logged_platform(record)
+    if status in {"producing_article", "rendering_cards", "completed", "failed"} and logged_platform:
+        return logged_platform
+
+    outputs = record.outputs or {}
+    toutiao_outputs = any(outputs.get(kind) for kind in ("toutiao_post_json", "toutiao_post_md", "toutiao_image_prompts", "toutiao_image_cards"))
+    xhs_outputs = any(outputs.get(kind) for kind in ("xhs_post_json", "xhs_post_md", "image_prompts", "image_cards"))
+    if toutiao_outputs and not xhs_outputs:
+        return "toutiao"
+    if xhs_outputs and not toutiao_outputs:
+        return "xhs"
+    return logged_platform or "xhs"
+
+
+def _status_ui_for_step(step: str, platform: str = "xhs") -> dict[str, Any]:
+    ui = dict(STATUS_UI.get(step, STATUS_UI["created"]))
+    ui["outputs"] = list(ui.get("outputs", []))
+    override = PLATFORM_STATUS_OVERRIDES.get(platform, {}).get(step)
+    if override:
+        ui.update({key: value for key, value in override.items() if key != "outputs"})
+        if "outputs" in override:
+            ui["outputs"] = list(override["outputs"])
+    return ui
+
+
 def _safe_parse_time(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -364,31 +485,34 @@ def _next_distinct_log_time(record: Any, flow: list[str], status: str) -> Option
     return None
 
 
-def _progress_flow(record: Any) -> tuple[str, str, list[str]]:
+def _progress_flow(record: Any) -> tuple[str, str, list[str], str]:
     status = _status_value(record.status)
     logged_statuses = {_status_value(log.status) for log in record.logs}
     error_step = str((record.error or {}).get("step") or "")
     output_kinds = record.outputs or {}
-    toutiao_seen = bool(output_kinds.get("toutiao_post_json") or output_kinds.get("toutiao_image_cards"))
+    platform = _record_platform(record)
+    toutiao_seen = platform == "toutiao" or bool(output_kinds.get("toutiao_post_json") or output_kinds.get("toutiao_image_cards"))
     produce_seen = bool(logged_statuses & PRODUCE_STATUSES or output_kinds.get("xhs_post_json") or output_kinds.get("toutiao_post_json"))
     image_generation_seen = bool(logged_statuses & IMAGE_GENERATION_STATUSES or output_kinds.get("image_cards") or output_kinds.get("toutiao_image_cards"))
     legacy_full_pipeline = "writing_xhs" in logged_statuses and "producing_article" not in logged_statuses
 
     if status == "analysis_completed":
-        return "analyze", "解析进度", ANALYZE_FLOW
+        return "analyze", "解析进度", ANALYZE_FLOW, platform
     if legacy_full_pipeline and (status in LEGACY_PRODUCE_STATUSES or error_step in LEGACY_PRODUCE_STATUSES):
-        return "produce", "图文产出进度", LEGACY_PRODUCE_FLOW
+        return "produce", "图文产出进度", LEGACY_PRODUCE_FLOW, platform
     if status == "toutiao_completed":
-        return "produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW
+        return "produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW, "toutiao"
     if status in PRODUCE_STATUSES or (status == "failed" and error_step in PRODUCE_STATUSES):
-        return ("produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW) if toutiao_seen else ("produce", "小红书稿进度", PRODUCE_FLOW)
+        return ("produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW, "toutiao") if toutiao_seen else ("produce", "小红书稿进度", PRODUCE_FLOW, "xhs")
     if status in IMAGE_GENERATION_STATUSES or (status == "failed" and error_step in IMAGE_GENERATION_STATUSES):
-        return "image_generation", "生图进度", IMAGE_GENERATION_FLOW
+        mode_label = "今日头条生图进度" if platform == "toutiao" else "生图进度"
+        return "image_generation", mode_label, IMAGE_GENERATION_FLOW, platform
     if status == "completed" and image_generation_seen:
-        return "image_generation", "生图进度", IMAGE_GENERATION_FLOW
+        mode_label = "今日头条生图进度" if platform == "toutiao" else "生图进度"
+        return "image_generation", mode_label, IMAGE_GENERATION_FLOW, platform
     if status == "completed" and produce_seen:
-        return "produce", "小红书稿进度", PRODUCE_FLOW
-    return "analyze", "解析进度", ANALYZE_FLOW
+        return ("produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW, "toutiao") if platform == "toutiao" else ("produce", "小红书稿进度", PRODUCE_FLOW, "xhs")
+    return "analyze", "解析进度", ANALYZE_FLOW, platform
 
 
 def _active_progress_step(record: Any, flow: list[str]) -> str:
@@ -420,7 +544,7 @@ def _stage_elapsed_seconds(record: Any, flow: list[str], step: str, now: datetim
 
 
 def _build_project_progress(record: Any) -> dict[str, Any]:
-    mode, mode_label, flow = _progress_flow(record)
+    mode, mode_label, flow, platform = _progress_flow(record)
     status = _status_value(record.status)
     active_step = _active_progress_step(record, flow)
     active_index = flow.index(active_step) if active_step in flow else 0
@@ -435,9 +559,9 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
     updated_at = _safe_parse_time(record.updated_at) or now
     elapsed_seconds = _seconds_between(started_at, now if status not in {"completed", "analysis_completed", "xhs_completed", "toutiao_completed", "failed"} else updated_at)
 
-    total_estimate = sum(float(STATUS_UI[step]["estimate_seconds"]) for step in flow)
-    completed_weight = sum(float(STATUS_UI[step]["estimate_seconds"]) for step in flow[:active_index])
-    active_estimate = float(STATUS_UI[active_step]["estimate_seconds"])
+    total_estimate = sum(float(_status_ui_for_step(step, platform)["estimate_seconds"]) for step in flow)
+    completed_weight = sum(float(_status_ui_for_step(step, platform)["estimate_seconds"]) for step in flow[:active_index])
+    active_estimate = float(_status_ui_for_step(active_step, platform)["estimate_seconds"])
     active_elapsed = _stage_elapsed_seconds(record, flow, active_step, now) or 0.0
     active_fraction = min(0.92, active_elapsed / max(active_estimate, 1.0))
 
@@ -452,7 +576,7 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
     else:
         percent = max(1, round(((completed_weight + active_estimate * active_fraction) / max(total_estimate, 1.0)) * 100))
         remaining_estimate = max(active_estimate - active_elapsed, min(active_estimate * 0.3, 15.0))
-        remaining_estimate += sum(float(STATUS_UI[step]["estimate_seconds"]) for step in flow[active_index + 1 :])
+        remaining_estimate += sum(float(_status_ui_for_step(step, platform)["estimate_seconds"]) for step in flow[active_index + 1 :])
         elapsed_done_estimate = max(completed_weight + min(active_elapsed, active_estimate), 1.0)
         scale = max(1.0, min(3.0, (elapsed_seconds or 0.0) / elapsed_done_estimate))
         remaining_seconds = round(remaining_estimate * scale, 1)
@@ -461,7 +585,7 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
     steps = []
     completed_steps = 0
     for index, step in enumerate(flow):
-        ui = STATUS_UI[step]
+        ui = _status_ui_for_step(step, platform)
         if status == "failed" and step == active_step:
             step_state = "failed"
         elif status in {"completed", "analysis_completed", "xhs_completed", "toutiao_completed"} and step == flow[-1]:
@@ -497,10 +621,11 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
             }
         )
 
-    current_ui = STATUS_UI.get(active_step, STATUS_UI["created"])
+    current_ui = _status_ui_for_step(active_step, platform)
     return {
         "mode": mode,
         "mode_label": mode_label,
+        "platform": platform,
         "percent": percent,
         "current_step": active_step,
         "current_step_label": current_ui["label"],
@@ -1075,18 +1200,20 @@ def cancel_project(project_id: str) -> dict:
 @router.get("/projects/{project_id}/status")
 def get_project_status(project_id: str) -> dict:
     record = _get_existing_project(project_id)
+    progress = _build_project_progress(record)
+    current_status_ui = _status_ui_for_step(_status_value(record.status), str(progress.get("platform") or "xhs"))
     return {
         "project_id": record.project_id,
         "status": record.status,
         "text_only": record.text_only,
-        "status_label": STATUS_UI.get(_status_value(record.status), STATUS_UI["created"])["label"],
-        "status_description": STATUS_UI.get(_status_value(record.status), STATUS_UI["created"])["description"],
+        "status_label": current_status_ui["label"],
+        "status_description": current_status_ui["description"],
         "updated_at": record.updated_at,
         "logs": [log.model_dump(mode="json") for log in record.logs],
         "error": record.error,
         "outputs": record.outputs,
         "warnings": record.warnings,
-        "progress": _build_project_progress(record),
+        "progress": progress,
         "can_cancel": store.can_cancel(project_id),
         "can_rerun_downstream": store.can_start_downstream_rerun(project_id),
         "downstream_rerun_missing_inputs": store.downstream_rerun_missing_inputs(project_id),

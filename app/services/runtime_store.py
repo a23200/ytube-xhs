@@ -328,7 +328,7 @@ class ProjectStore:
                     time=record.updated_at,
                     status=ProjectStatus.producing_article,
                     message="Produce job queued.",
-                    details={"scope": "produce"},
+                    details={"scope": "produce", "platform": "xhs"},
                 )
             )
             self._write_record(paths, record)
@@ -380,7 +380,7 @@ class ProjectStore:
                     time=record.updated_at,
                     status=ProjectStatus.rendering_cards,
                     message="Image generation job queued.",
-                    details={"scope": "image_generation"},
+                    details={"scope": "image_generation", "platform": "xhs"},
                 )
             )
             self._write_record(paths, record)

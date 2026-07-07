@@ -65,6 +65,54 @@ const STAGE_OUTPUTS = {
   ],
 };
 
+const ROUTE_STATUS_OVERRIDES = {
+  toutiao: {
+    producing_article: { label: "生成今日头条稿", hint: "生成今日头条标题、正文和配图计划" },
+    rendering_cards: { label: "渲染今日头条卡片", hint: "生成今日头条 PNG 卡片" },
+  },
+  xhs: {
+    producing_article: { label: "生成小红书稿", hint: "生成小红书标题、正文、标签和配图计划" },
+    rendering_cards: { label: "渲染图文卡片", hint: "生成小红书竖版 PNG 卡片" },
+  },
+};
+
+const ROUTE_STAGE_OUTPUTS = {
+  toutiao: {
+    producing_article: ["toutiao_post_json", "toutiao_image_prompts"],
+    rendering_cards: ["toutiao_image_cards"],
+    completed: [
+      "metadata",
+      "transcript",
+      "keyframes",
+      "visual_analysis",
+      "content_assets",
+      "toutiao_post_json",
+      "toutiao_post_md",
+      "toutiao_image_prompts",
+      "toutiao_image_cards",
+      "asset_package",
+      "run_metadata",
+    ],
+  },
+  xhs: {
+    producing_article: ["xhs_post_json", "image_prompts"],
+    rendering_cards: ["image_cards"],
+    completed: [
+      "metadata",
+      "transcript",
+      "keyframes",
+      "visual_analysis",
+      "content_assets",
+      "xhs_post_json",
+      "xhs_post_md",
+      "image_prompts",
+      "image_cards",
+      "asset_package",
+      "run_metadata",
+    ],
+  },
+};
+
 const FILE_KINDS = [
   ["metadata", "视频信息", "source/metadata.json"],
   ["transcript", "字幕时间轴", "transcript/transcript.json"],
@@ -200,16 +248,49 @@ function statusClass(status) {
   return `status-${String(status).replace(/[^a-z0-9_-]/gi, "")}`;
 }
 
-function statusLabel(status) {
-  return STATUS_META[status]?.label || String(status || "未知状态");
+function platformFromDetails(details) {
+  if (!details || typeof details !== "object") return "";
+  if (details.platform === "toutiao" || details.platform === "xhs") return details.platform;
+  return platformFromDetails(details.details);
 }
 
-function statusHint(status) {
-  return STATUS_META[status]?.hint || "等待后端更新状态";
+function platformFromStatusData(statusData) {
+  if (!statusData || typeof statusData !== "object") return "";
+  if (statusData.progress?.platform === "toutiao" || statusData.progress?.platform === "xhs") return statusData.progress.platform;
+  const logs = Array.isArray(statusData.logs) ? statusData.logs : [];
+  for (let index = logs.length - 1; index >= 0; index -= 1) {
+    const platform = platformFromDetails(logs[index]?.details);
+    if (platform) return platform;
+  }
+  const outputs = statusData.outputs || statusData.record?.outputs || {};
+  if (outputs.toutiao_post_json || outputs.toutiao_post_md || outputs.toutiao_image_prompts || outputs.toutiao_image_cards) return "toutiao";
+  if (outputs.xhs_post_json || outputs.xhs_post_md || outputs.image_prompts || outputs.image_cards) return "xhs";
+  return "";
 }
 
-function statusPill(status, extraClass = "") {
-  return `<span class="status-pill ${statusClass(status)} ${extraClass}">${escapeHtml(statusLabel(status))}</span>`;
+function statusMeta(status, route = null, statusData = null) {
+  const platform = platformFromStatusData(statusData) || route?.key || "";
+  return {
+    ...(STATUS_META[status] || { label: String(status || "未知状态"), hint: "等待后端更新状态" }),
+    ...(ROUTE_STATUS_OVERRIDES[platform]?.[status] || {}),
+  };
+}
+
+function statusLabel(status, route = null, statusData = null) {
+  return statusMeta(status, route, statusData).label || String(status || "未知状态");
+}
+
+function statusHint(status, route = null, statusData = null) {
+  return statusMeta(status, route, statusData).hint || "等待后端更新状态";
+}
+
+function statusPill(status, extraClass = "", route = null, statusData = null) {
+  return `<span class="status-pill ${statusClass(status)} ${extraClass}">${escapeHtml(statusLabel(status, route, statusData))}</span>`;
+}
+
+function stageOutputsForStep(step, route = null, statusData = null) {
+  const platform = platformFromStatusData(statusData) || route?.key || "";
+  return ROUTE_STAGE_OUTPUTS[platform]?.[step] || STAGE_OUTPUTS[step] || [];
 }
 
 function currentContentRoute() {
@@ -856,7 +937,7 @@ function renderWorkbenchStatusCard() {
           <h3>当前任务</h3>
           <p class="mono">${escapeHtml(state.activeProjectId)}</p>
         </div>
-        ${statusPill(status.status)}
+        ${statusPill(status.status, "", currentContentRoute(), status)}
       </div>
       ${renderProgressSummary(status)}
       ${status.error ? errorState(errorText(status.error)) : ""}
@@ -877,8 +958,8 @@ function renderProgressSummary(statusData) {
       <div class="row between wrap">
         <div>
           <span class="progress-eyebrow">${escapeHtml(progress.mode_label || "执行进度")}</span>
-          <h4>当前阶段：${escapeHtml(progress.current_step_label || statusLabel(statusData.status))}</h4>
-          <p>${escapeHtml(progress.current_step_description || statusHint(statusData.status))}</p>
+          <h4>当前阶段：${escapeHtml(progress.current_step_label || statusLabel(statusData.status, currentContentRoute(), statusData))}</h4>
+          <p>${escapeHtml(progress.current_step_description || statusHint(statusData.status, currentContentRoute(), statusData))}</p>
         </div>
         <strong>${percent}%</strong>
       </div>
@@ -909,7 +990,7 @@ function renderRecentProjectsCompact() {
           return `
             <button class="recent-project ${state.activeProjectId === project.project_id ? "active" : ""}" data-action="select-project" data-project-id="${project.project_id}" type="button">
               <span>${escapeHtml(textSnippet(summary.title || project.project_id, 42))}</span>
-              <small>${escapeHtml(statusLabel(project.status))} · ${summary.textOnly ? "纯文案" : `${Number(summary.frameCount || 0)} 帧 · ${Number(summary.cardCount || 0)} 卡`}</small>
+              <small>${escapeHtml(statusLabel(project.status, null, project))} · ${summary.textOnly ? "纯文案" : `${Number(summary.frameCount || 0)} 帧 · ${Number(summary.cardCount || 0)} 卡`}</small>
             </button>
           `;
         }).join("") : emptyState("暂无项目", "提交链接后会出现在这里。")}
@@ -968,7 +1049,7 @@ function renderWorkbenchMetadata(metadata, detail) {
       <div class="stack">
         <div class="row between wrap">
           <h4>${escapeHtml(title)}</h4>
-          ${statusPill(detail.status.status)}
+          ${statusPill(detail.status.status, "", currentContentRoute(), detail.status)}
         </div>
           <div class="meta-grid compact-meta">
             <div class="meta-item"><span>作者</span><b>${escapeHtml(metadata.author || "未知")}</b></div>
@@ -1197,7 +1278,7 @@ function renderCurrentTaskPanel() {
           <p class="mono">${escapeHtml(state.activeProjectId)}</p>
         </div>
         <div class="row wrap">
-          ${statusPill(state.activeStatus.status)}
+          ${statusPill(state.activeStatus.status, "", currentContentRoute(), state.activeStatus)}
           <a class="ghost-button" href="/projects/${state.activeProjectId}" data-route="/projects/${state.activeProjectId}">查看详情</a>
         </div>
       </div>
@@ -1241,7 +1322,8 @@ function renderStatusTimeline(statusData) {
   return `
     <div class="timeline">
       ${STATUS_STEPS.map(([step, label, hint], index) => {
-        const stageOutputs = STAGE_OUTPUTS[step] || [];
+        const meta = statusMeta(step, currentContentRoute(), statusData);
+        const stageOutputs = stageOutputsForStep(step, currentContentRoute(), statusData);
         const readyCount = stageOutputs.filter((kind) => outputs[kind]).length;
         const first = firstLogTime(statusData, step);
         const next = nextLogTime(statusData, step);
@@ -1254,7 +1336,7 @@ function renderStatusTimeline(statusData) {
         return `
           <div class="timeline-step ${klass}">
             <span class="timeline-dot"></span>
-            <div><b>${escapeHtml(label)}</b><span>${escapeHtml(hint)}</span></div>
+            <div><b>${escapeHtml(meta.label || label)}</b><span>${escapeHtml(meta.hint || hint)}</span></div>
             <span class="mini-pill">${escapeHtml(elapsed)} · ${escapeHtml(countLabel)}</span>
           </div>
         `;
@@ -1302,7 +1384,7 @@ function renderLogTable(logs) {
           ${logs.map((log) => `
             <tr>
               <td class="mono subtle">${escapeHtml(safeDate(log.time))}</td>
-              <td>${statusPill(log.status)}</td>
+              <td>${statusPill(log.status, "", currentContentRoute(), { logs: [log] })}</td>
               <td>${escapeHtml(logMessageZh(log.message))}</td>
               <td class="mono small-text">${log.details ? escapeHtml(JSON.stringify(log.details)) : ""}</td>
             </tr>
@@ -1362,7 +1444,7 @@ function renderProjectTable(projects, options = {}) {
                     <span class="mono small-text">${escapeHtml(project.project_id)} · ${escapeHtml(project.url || "")}</span>
                   </div>
                 </td>
-                <td>${statusPill(project.status)}</td>
+                <td>${statusPill(project.status, "", null, project)}</td>
                 <td class="small-text">${escapeHtml(safeDate(project.created_at))}</td>
                 <td class="small-text">${escapeHtml(elapsed)}</td>
                 <td>${summary.textOnly ? "纯文案" : Number(summary.frameCount || 0)}</td>
@@ -1442,7 +1524,7 @@ async function renderProjectDetail(projectId) {
   shell({
     title: summary.title || "项目详情",
     mark: "详",
-    subtitle: `${projectId} · ${statusLabel(detail.record.status)}`,
+    subtitle: `${projectId} · ${statusLabel(detail.record.status, currentContentRoute(), detail.status)}`,
     actions: renderDetailActions(detail),
     body: `
       <div class="grid">
@@ -1488,7 +1570,7 @@ function renderDetailHero(detail) {
               <h3 style="margin: 0 0 6px">${escapeHtml(title)}</h3>
               <div class="small-text">${escapeHtml(metadata.author || summary.author || "作者未知")}</div>
             </div>
-            ${statusPill(detail.status.status)}
+            ${statusPill(detail.status.status, "", currentContentRoute(), detail.status)}
           </div>
           ${detail.status.error ? errorState(errorText(detail.status.error)) : ""}
           ${warnings.length ? warningState(warnings.join(" / ")) : ""}
@@ -2480,7 +2562,7 @@ document.addEventListener("click", async (event) => {
   if (action === "save-image-cards") await saveImageCards();
   if (action === "copy-logs") {
     const logs = state.activeStatus?.logs || state.detail?.status?.logs || [];
-    await copyText(logs.map((log) => `${safeDate(log.time)} ${statusLabel(log.status)} ${logMessageZh(log.message)}`).join("\n"));
+    await copyText(logs.map((log) => `${safeDate(log.time)} ${statusLabel(log.status, currentContentRoute(), { logs: [log] })} ${logMessageZh(log.message)}`).join("\n"));
   }
   if (action === "copy-text") {
     const target = document.querySelector(`#${actionNode.dataset.copyTarget}`);

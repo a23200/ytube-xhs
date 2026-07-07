@@ -591,7 +591,7 @@ def run_project_produce_pipeline(project_id: str) -> None:
         assets = read_json(required_files["content_assets"])
         _register_standard_outputs(project_id)
 
-        store.set_status(project_id, ProjectStatus.producing_article, "Generating Xiaohongshu post from reviewed analysis assets.")
+        store.set_status(project_id, ProjectStatus.producing_article, "Generating Xiaohongshu post from reviewed analysis assets.", {"platform": "xhs"})
         post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
         store.add_output(project_id, "xhs_post_json", paths.analysis_dir / "xiaohongshu-post.json")
 
@@ -605,9 +605,9 @@ def run_project_produce_pipeline(project_id: str) -> None:
         write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
         _register_standard_outputs(project_id)
         if record.text_only:
-            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only XHS article completed. Image generation is disabled.")
+            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only XHS article completed. Image generation is disabled.", {"platform": "xhs"})
         else:
-            store.set_status(project_id, ProjectStatus.xhs_completed, "XHS article completed. Image generation can be run next.")
+            store.set_status(project_id, ProjectStatus.xhs_completed, "XHS article completed. Image generation can be run next.", {"platform": "xhs"})
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return
@@ -670,9 +670,9 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
         write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={}, platform="toutiao")
         _register_standard_outputs(project_id)
         if record.text_only:
-            store.set_status(project_id, ProjectStatus.toutiao_completed, "Text-only Toutiao article completed. Image generation is disabled.")
+            store.set_status(project_id, ProjectStatus.toutiao_completed, "Text-only Toutiao article completed. Image generation is disabled.", {"platform": "toutiao"})
         else:
-            store.set_status(project_id, ProjectStatus.toutiao_completed, "Toutiao article completed. Image generation can be run next.")
+            store.set_status(project_id, ProjectStatus.toutiao_completed, "Toutiao article completed. Image generation can be run next.", {"platform": "toutiao"})
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return
@@ -732,14 +732,14 @@ def run_project_image_generation_pipeline(project_id: str, style: str = "clean")
         prompts = read_json(required_files["image_prompts"])
         _register_standard_outputs(project_id)
 
-        store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering finished Xiaohongshu image-card PNG files.")
+        store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering finished Xiaohongshu image-card PNG files.", {"platform": "xhs"})
         image_cards = render_image_cards(metadata, assets, post, keyframes, prompts, paths, style=style)
         store.add_output(project_id, "image_cards", paths.analysis_dir / "image-cards.json")
 
         warnings = store.get(project_id).warnings
         write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
         _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.completed, "Image generation completed. XHS article and image cards are ready.")
+        store.set_status(project_id, ProjectStatus.completed, "Image generation completed. XHS article and image cards are ready.", {"platform": "xhs"})
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return
@@ -817,7 +817,7 @@ def run_project_toutiao_image_generation_pipeline(project_id: str, style: str = 
         warnings = store.get(project_id).warnings
         write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards, platform="toutiao")
         _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.completed, "Image generation completed. Toutiao article and image cards are ready.")
+        store.set_status(project_id, ProjectStatus.completed, "Image generation completed. Toutiao article and image cards are ready.", {"platform": "toutiao"})
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return

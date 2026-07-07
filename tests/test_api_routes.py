@@ -980,6 +980,46 @@ def test_project_status_progress_reports_produce_mode(tmp_path, monkeypatch):
     assert [step["label"] for step in body["progress"]["steps"]] == ["生成小红书稿", "小红书稿完成"]
 
 
+def test_project_status_progress_reports_toutiao_produce_mode_immediately(tmp_path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(routes, "store", test_store)
+    monkeypatch.setattr(routes, "run_project_pipeline", lambda project_id: None)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/projects",
+        json={
+            "url": "https://example.com/video",
+            "language": "zh",
+            "style": "干货",
+            "use_whisper": True,
+            "max_frames": 8,
+        },
+    )
+    project_id = response.json()["project_id"]
+    _write_registered_upstream(test_store, project_id)
+    paths = test_store.paths(project_id)
+    write_json(paths.analysis_dir / "content-assets.json", _valid_content_assets())
+    test_store.add_output(project_id, "content_assets", paths.file_for_kind("content_assets"))
+    test_store.set_status(project_id, ProjectStatus.analysis_completed, "ready")
+    started, _record, missing = test_store.try_start_platform_produce(project_id, platform="toutiao")
+
+    status = client.get(f"/api/projects/{project_id}/status")
+
+    assert started is True
+    assert missing == []
+    assert status.status_code == 200
+    body = status.json()
+    assert body["status_label"] == "生成今日头条稿"
+    assert body["progress"]["mode"] == "produce"
+    assert body["progress"]["mode_label"] == "今日头条稿进度"
+    assert body["progress"]["platform"] == "toutiao"
+    assert body["progress"]["current_step"] == "producing_article"
+    assert body["progress"]["current_step_label"] == "生成今日头条稿"
+    assert [step["label"] for step in body["progress"]["steps"]] == ["生成今日头条稿", "今日头条稿完成"]
+    assert body["progress"]["steps"][0]["output_kinds_expected"] == ["toutiao_post_json", "toutiao_image_prompts"]
+
+
 def test_project_status_progress_reports_image_generation_mode(tmp_path, monkeypatch):
     test_store = ProjectStore(tmp_path)
     monkeypatch.setattr(routes, "store", test_store)
