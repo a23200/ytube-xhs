@@ -57,6 +57,7 @@ def test_visual_analyzer_writes_skipped_payload_when_keyframes_skipped(tmp_path:
         {
             "skipped": True,
             "skip_reason": "No video file is available; continuing with transcript-only analysis.",
+            "analysis_mode": "transcript_only",
             "keyframes": [],
         },
         language="zh",
@@ -66,6 +67,7 @@ def test_visual_analyzer_writes_skipped_payload_when_keyframes_skipped(tmp_path:
     assert payload["skipped"] is True
     assert payload["frames"] == []
     assert payload["ocr_enabled"] is False
+    assert payload["analysis_mode"] == "transcript_only"
     assert read_json(paths.analysis_dir / "visual-analysis.json")["skip_reason"]
 
 

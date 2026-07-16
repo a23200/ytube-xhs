@@ -320,6 +320,7 @@ def analyze_visuals(
             "frames": [],
             "skipped": True,
             "skip_reason": warning,
+            "analysis_mode": keyframes_payload.get("analysis_mode") or "transcript_only",
         }
         write_json(paths.analysis_dir / "visual-analysis.json", payload)
         return payload

@@ -2,6 +2,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.services.docx_writer import write_article_docx
+from app.services.platforms import get_platform, platform_values
 from app.services.runtime_store import ProjectPaths, read_json, write_json
 
 FRAME_FILENAME_RE = re.compile(r"^frame_\d{4}\.jpg$")
@@ -101,13 +103,21 @@ def write_reports(
     platform: str = "xhs",
 ) -> Dict[str, Any]:
     image_cards = image_cards or {}
-    is_toutiao = platform == "toutiao"
-    platform_name = "今日头条" if is_toutiao else "小红书"
-    text_only = content_assets.get("analysis_mode") == "text_only" or keyframes_payload.get("analysis_mode") == "text_only"
-    post_key = "toutiao_post" if is_toutiao else "xiaohongshu_post"
-    markdown_filename = "toutiao-post.md" if is_toutiao else "xhs-post.md"
-    cards_dir = paths.toutiao_cards_dir if is_toutiao else paths.cards_dir
+    adapter = get_platform(platform)
+    is_xhs = adapter.key == "xhs"
+    platform_name = adapter.name
+    analysis_mode = str(
+        content_assets.get("analysis_mode")
+        or keyframes_payload.get("analysis_mode")
+        or "full"
+    )
+    text_only = analysis_mode == "text_only"
+    post_key = "xiaohongshu_post" if is_xhs else f"{adapter.key}_post"
+    markdown_filename = adapter.markdown_filename
+    cards_dir = paths.toutiao_cards_dir if adapter.key == "toutiao" else paths.cards_dir
     card_paths = _card_paths(paths, image_cards, cards_dir=cards_dir)
+    quality_path = paths.analysis_dir / adapter.quality_filename
+    quality_report = read_json(quality_path) if quality_path.exists() else {}
     existing_package_path = paths.analysis_dir / "asset-package.json"
     if existing_package_path.exists():
         try:
@@ -126,18 +136,20 @@ def write_reports(
             },
             "keyframes": keyframes_payload,
             "visual_analysis": visual_payload,
+            "analysis_mode": analysis_mode,
             "content_assets": content_assets,
             post_key: xhs_post,
-            f"{platform}_image_prompts": image_prompts.get("image_prompts", []),
-            f"{platform}_image_cards": image_cards.get("cards", []),
+            f"{adapter.key}_image_prompts": image_prompts.get("image_prompts", []),
+            f"{adapter.key}_image_cards": image_cards.get("cards", []),
+            f"{adapter.key}_quality_report": quality_report,
             "materials": {
                 "source_dir": str(paths.source_dir),
                 "frames_dir": str(paths.frames_dir),
                 "cards_dir": str(paths.cards_dir),
                 "toutiao_cards_dir": str(paths.toutiao_cards_dir),
                 "frame_paths": _frame_paths(paths, keyframes_payload),
-                "card_paths": card_paths if not is_toutiao else asset_package.get("materials", {}).get("card_paths", []),
-                "toutiao_card_paths": card_paths if is_toutiao else asset_package.get("materials", {}).get("toutiao_card_paths", []),
+                "card_paths": card_paths if is_xhs else asset_package.get("materials", {}).get("card_paths", []),
+                "toutiao_card_paths": card_paths if adapter.key == "toutiao" else asset_package.get("materials", {}).get("toutiao_card_paths", []),
             },
             "warnings": warnings,
             "compliance": {
@@ -146,15 +158,16 @@ def write_reports(
             },
         }
     )
-    if not is_toutiao:
+    if is_xhs:
         asset_package["xiaohongshu_post"] = xhs_post
         asset_package["image_prompts"] = image_prompts.get("image_prompts", [])
         asset_package["image_cards"] = image_cards.get("cards", [])
-    if is_toutiao:
+    if adapter.key == "toutiao":
         asset_package["toutiao_post"] = xhs_post
         asset_package["toutiao_image_prompts"] = image_prompts.get("image_prompts", [])
         asset_package["toutiao_image_cards"] = image_cards.get("cards", [])
     write_json(paths.analysis_dir / "asset-package.json", asset_package)
+    write_article_docx(metadata, xhs_post, adapter, paths.analysis_dir / adapter.docx_filename)
     titles = xhs_post.get("titles", [])
     image_plan = xhs_post.get("image_plan", [])
     hashtags = xhs_post.get("hashtags", [])
@@ -179,7 +192,7 @@ def write_reports(
 
 - 纯文案模式已启用：不抽关键帧、不 OCR、不生成截图、不生成图片卡片。
 """
-    markdown = f"""# {platform_name}{'文章稿' if text_only else '图文稿'}
+    markdown = f"""# {platform_name}{'文章稿' if text_only or not adapter.supports_images else '图文稿'}
 
 ## 视频信息
 
@@ -359,10 +372,15 @@ def write_analysis_asset_package(
     paths: ProjectPaths,
     warnings: List[str],
 ) -> Dict[str, Any]:
-    text_only = content_assets.get("analysis_mode") == "text_only" or keyframes_payload.get("analysis_mode") == "text_only"
+    analysis_mode = str(
+        content_assets.get("analysis_mode")
+        or keyframes_payload.get("analysis_mode")
+        or "full"
+    )
+    text_only = analysis_mode == "text_only"
     asset_package = {
         "status": "analysis_completed",
-        "analysis_mode": "text_only" if text_only else "full",
+        "analysis_mode": analysis_mode,
         "metadata": metadata,
         "transcript": {
             "path": str(paths.transcript_dir / "transcript.json"),
@@ -404,22 +422,29 @@ def write_partial_asset_package(
     warnings: List[str],
 ) -> Dict[str, Any]:
     """Write a truthful package of whatever the pipeline produced before failing."""
-    known_files = {
+    known_json_files = {
         "metadata": paths.source_dir / "metadata.json",
         "transcript": paths.transcript_dir / "transcript.json",
         "keyframes": paths.analysis_dir / "keyframes.json",
         "visual_analysis": paths.analysis_dir / "visual-analysis.json",
         "content_assets": paths.analysis_dir / "content-assets.json",
-        "xiaohongshu_post": paths.analysis_dir / "xiaohongshu-post.json",
-        "image_prompts": paths.analysis_dir / "image-prompts.json",
-        "image_cards": paths.analysis_dir / "image-cards.json",
-        "toutiao_post": paths.analysis_dir / "toutiao-post.json",
-        "toutiao_image_prompts": paths.analysis_dir / "toutiao-image-prompts.json",
-        "toutiao_image_cards": paths.analysis_dir / "toutiao-image-cards.json",
     }
+    available_artifacts: Dict[str, Path] = {}
+    for adapter in platform_values():
+        post_key = "xiaohongshu_post" if adapter.key == "xhs" else f"{adapter.key}_post"
+        known_json_files[post_key] = paths.analysis_dir / adapter.post_filename
+        known_json_files[f"{adapter.key}_quality_report"] = paths.analysis_dir / adapter.quality_filename
+        available_artifacts[f"{adapter.key}_post_markdown"] = paths.analysis_dir / adapter.markdown_filename
+        available_artifacts[f"{adapter.key}_post_docx"] = paths.analysis_dir / adapter.docx_filename
+        if adapter.supports_images:
+            prompts_key = "image_prompts" if adapter.key == "xhs" else f"{adapter.key}_image_prompts"
+            cards_key = "image_cards" if adapter.key == "xhs" else f"{adapter.key}_image_cards"
+            known_json_files[prompts_key] = paths.analysis_dir / adapter.image_prompts_filename
+            known_json_files[cards_key] = paths.analysis_dir / adapter.image_cards_filename
+
     loaded: Dict[str, Any] = {}
     available_files: Dict[str, str] = {}
-    for key, path in known_files.items():
+    for key, path in known_json_files.items():
         if not path.exists():
             continue
         available_files[key] = str(path)
@@ -427,6 +452,9 @@ def write_partial_asset_package(
             loaded[key] = read_json(path)
         except Exception:
             loaded[key] = {"path": str(path), "read_error": "Could not parse JSON."}
+    for key, path in available_artifacts.items():
+        if path.exists():
+            available_files[key] = str(path)
 
     loaded_keyframes = loaded.get("keyframes")
     frame_paths = _frame_paths(paths, loaded_keyframes) if isinstance(loaded_keyframes, dict) else []
@@ -456,6 +484,12 @@ def write_partial_asset_package(
         "toutiao_post": loaded.get("toutiao_post"),
         "toutiao_image_prompts": loaded.get("toutiao_image_prompts", {}).get("image_prompts", []),
         "toutiao_image_cards": loaded.get("toutiao_image_cards", {}).get("cards", []),
+        "xhs_quality_report": loaded.get("xhs_quality_report"),
+        "toutiao_quality_report": loaded.get("toutiao_quality_report"),
+        "douyin_post": loaded.get("douyin_post"),
+        "douyin_quality_report": loaded.get("douyin_quality_report"),
+        "bilibili_post": loaded.get("bilibili_post"),
+        "bilibili_quality_report": loaded.get("bilibili_quality_report"),
         "materials": {
             "source_dir": str(paths.source_dir),
             "frames_dir": str(paths.frames_dir),

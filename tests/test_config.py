@@ -15,6 +15,7 @@ def test_settings_read_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("XHS_LLM_TIMEOUT_MS", "1234")
     monkeypatch.setenv("XHS_LLM_MAX_CHARS", "4567")
     monkeypatch.setenv("XHS_LLM_MAX_TOKENS", "321")
+    monkeypatch.setenv("XHS_LLM_RETRY_ATTEMPTS", "5")
     monkeypatch.setenv("XHS_WHISPER_MODEL", "tiny")
     monkeypatch.setenv("XHS_WHISPER_DEVICE", "cpu")
     monkeypatch.setenv("XHS_WHISPER_COMPUTE_TYPE", "int8")
@@ -30,6 +31,7 @@ def test_settings_read_environment(monkeypatch, tmp_path):
     assert settings.llm_timeout_ms == 1234
     assert settings.llm_max_chars == 4567
     assert settings.llm_max_tokens == 321
+    assert settings.llm_retry_attempts == 5
     assert settings.whisper_model == "tiny"
     assert settings.whisper_device == "cpu"
     assert settings.whisper_compute_type == "int8"
@@ -41,6 +43,7 @@ def test_settings_invalid_int_env_uses_default(monkeypatch):
     settings = Settings()
 
     assert settings.llm_timeout_ms == 90000
+    assert settings.llm_retry_attempts == 3
 
 
 def test_relative_runtime_dir_is_resolved_from_project_root(monkeypatch):

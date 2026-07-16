@@ -13,7 +13,7 @@ def _valid_post(body: str) -> dict:
         "target_audience": ["新手"],
         "titles": ["标题1", "标题2", "标题3", "标题4", "标题5"],
         "cover_text": "封面",
-        "hook": "开头",
+        "hook": "看似只是整理材料，结果最容易出问题的，反而是照搬原话。",
         "body": body,
         "image_plan": [
             {

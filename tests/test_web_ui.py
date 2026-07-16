@@ -26,6 +26,7 @@ def test_web_ui_serves_required_controls_and_assets():
     for required in [
         'id="app"',
         'id="modal-root"',
+        "Video-to-Multiplatform Content Operations Console",
         "/static/app.js",
         "/static/styles.css",
     ]:
@@ -56,6 +57,7 @@ def test_web_ui_serves_required_controls_and_assets():
         "renderProjectTable",
         "renderProjectDetail",
         "生产工作台",
+        "Multi-platform Content Workbench",
         "一键分析解析",
         "一键产出图文",
         "当前阶段",
@@ -88,6 +90,7 @@ def test_web_ui_serves_required_controls_and_assets():
         "检查生图配置",
         "真实生成测试图",
         "密钥已配置",
+        'aria-disabled="true"',
     ]:
         assert required in js
 

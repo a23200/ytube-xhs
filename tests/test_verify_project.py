@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+from app.services.docx_writer import write_article_docx
+from app.services.platforms import get_platform
 from app.services.runtime_store import read_json, write_json
 from scripts.verify_project import verify_project
 
@@ -205,6 +209,19 @@ def _write_valid_downstream_outputs(project: Path) -> None:
     }
     write_json(project / "analysis/content-assets.json", content_assets)
     write_json(project / "analysis/xiaohongshu-post.json", xhs_post)
+    write_article_docx(
+        {"title": "Title", "author": "Author", "url": "https://example.com/video"},
+        xhs_post,
+        get_platform("xhs"),
+        project / "analysis/xhs-article.docx",
+    )
+    xhs_quality_report = {
+        "platform": "xhs",
+        "passed": True,
+        "similarity": {"estimated_rewrite_degree": 0.95},
+        "violations": [],
+    }
+    write_json(project / "analysis/xhs-quality-report.json", xhs_quality_report)
     write_json(project / "analysis/image-prompts.json", image_prompts)
     write_json(project / "analysis/image-cards.json", image_cards)
     write_json(
@@ -216,6 +233,7 @@ def _write_valid_downstream_outputs(project: Path) -> None:
             "visual_analysis": {"frames": [{}]},
             "content_assets": content_assets,
             "xiaohongshu_post": xhs_post,
+            "xhs_quality_report": xhs_quality_report,
             "image_prompts": image_prompts["image_prompts"],
             "image_cards": image_cards["cards"],
             "materials": {
@@ -275,11 +293,198 @@ def _write_valid_downstream_outputs(project: Path) -> None:
             "content_assets": "analysis/content-assets.json",
             "xhs_post_json": "analysis/xiaohongshu-post.json",
             "xhs_post_md": "analysis/xhs-post.md",
+            "xhs_post_docx": "analysis/xhs-article.docx",
+            "xhs_quality_report": "analysis/xhs-quality-report.json",
             "image_prompts": "analysis/image-prompts.json",
             "image_cards": "analysis/image-cards.json",
             "asset_package": "analysis/asset-package.json",
         }
     )
+    write_json(project / "project.json", project_record)
+
+
+def _write_valid_text_article_project(project: Path, platform: str) -> None:
+    adapter = get_platform(platform)
+    status = f"{platform}_completed"
+    video_path = project / "source/source.mp4"
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.write_bytes(b"mp4")
+    project_record = {
+        "status": status,
+        "text_only": True,
+        "outputs": {},
+        "error": None,
+        "warnings": [],
+    }
+    write_json(project / "project.json", project_record)
+    write_json(
+        project / "source/metadata.json",
+        {
+            "video_id": "text-v1",
+            "url": "https://example.com/video",
+            "title": "Text source",
+            "author": None,
+            "duration": None,
+            "video_file": str(video_path),
+            "available_subtitles": [],
+            "automatic_captions": [],
+            "subtitle_track_summary": {
+                "available_subtitles": {"count": 0, "languages": [], "formats_by_language": {}},
+                "automatic_captions": {"count": 0, "languages": [], "formats_by_language": {}},
+            },
+        },
+    )
+    write_json(
+        project / "transcript/transcript.json",
+        {
+            "source": "faster-whisper",
+            "language": "zh",
+            "segment_count": 1,
+            "segments": [{"start": 0.0, "end": 2.0, "text": "原始证据", "source": "faster-whisper", "importance": 0.5}],
+        },
+    )
+    write_json(
+        project / "analysis/keyframes.json",
+        {
+            "video_file": str(video_path),
+            "requested_max_frames": 8,
+            "transcript_segment_count": 1,
+            "frame_count": 0,
+            "keyframes": [],
+            "skipped": True,
+            "skip_reason": "Text-only mode",
+            "analysis_mode": "text_only",
+        },
+    )
+    write_json(
+        project / "analysis/visual-analysis.json",
+        {
+            "ocr_provider": "none",
+            "ocr_enabled": False,
+            "frames": [],
+            "skipped": True,
+            "skip_reason": "Text-only mode",
+            "analysis_mode": "text_only",
+        },
+    )
+    write_json(
+        project / "analysis/run-metadata.json",
+        {"status": status, "video_id": "text-v1", "title": "Text source", "author": None, "duration": None, "source_url": "https://example.com/video"},
+    )
+    content_assets = {
+        "analysis_mode": "text_only",
+        "one_sentence_summary": "先核对证据，再用自己的话说明问题。",
+        "core_points": [{"point": "先核对证据", "why_it_matters": "避免误解", "evidence": [{"type": "transcript", "time": 1.0, "text": "原始证据"}]}],
+        "golden_quotes": [{"quote": "讲清楚比堆术语更重要", "rewrite_note": "已改写"}],
+        "chapters": [{"title": "表达方法", "summary": "把复杂内容讲清楚"}],
+        "steps": [{"step": "核对来源", "evidence_time": 1.0}],
+        "audience": ["普通读者"],
+        "pain_points": ["内容难懂"],
+        "xiaohongshu_angles": ["讲人话"],
+        "recommended_content_type": "原创文章",
+        "source_evidence": [{"claim": "证据需要核对", "source_type": "transcript", "time": 1.0, "source_text": "原始证据"}],
+    }
+    write_json(project / "analysis/content-assets.json", content_assets)
+    post = {
+        "content_type": "原创文章",
+        "target_audience": ["普通读者"],
+        "titles": ["标题一", "标题二", "标题三", "标题四", "标题五"],
+        "cover_text": "先别急着下结论",
+        "hook": "看似只是省一步，结果最容易出错的，反而是这一步。",
+        "body": "很多人先给答案，再回头找证据。更稳妥的做法，是先核对来源，再把复杂内容讲成普通人听得懂的话。",
+        "image_plan": [{"page": 1, "role": "cover", "caption": "先核对证据", "source_frame_time": None, "source_frame_path": None, "content_point": "核对来源"}],
+        "hashtags": ["#内容创作"],
+        "publish_suggestion": "发布前复核事实。",
+        "platform": platform,
+        "platform_name": adapter.name,
+    }
+    write_json(project / f"analysis/{adapter.post_filename}", post)
+    quality = {
+        "platform": platform,
+        "passed": True,
+        "similarity": {"estimated_rewrite_degree": 0.92, "estimated_similarity": 0.08, "longest_common_fragment_chars": 0},
+        "violations": [],
+    }
+    write_json(project / f"analysis/{adapter.quality_filename}", quality)
+    write_article_docx({"title": "Text source", "url": "https://example.com/video"}, post, adapter, project / f"analysis/{adapter.docx_filename}")
+    heading = {"xhs": "小红书标题", "toutiao": "今日头条标题", "douyin": "抖音标题", "bilibili": "哔哩哔哩标题"}[platform]
+    markdown = f"""# {adapter.name}文章稿
+
+## 视频信息
+标题：Text source
+
+## 一句话总结
+先核对证据，再用自己的话说明问题。
+
+## {heading}
+- 标题一
+- 标题二
+- 标题三
+- 标题四
+- 标题五
+
+## 封面文案
+先别急着下结论
+
+## 开头
+看似只是省一步，结果最容易出错的，反而是这一步。
+
+## 正文
+很多人先给答案，再回头找证据。更稳妥的做法，是先核对来源，再把复杂内容讲成普通人听得懂的话。
+
+## 图片/截图
+- 纯文案模式已启用。
+
+## 标签
+- #内容创作
+
+## 素材路径
+- source/metadata.json
+- transcript/transcript.json
+- analysis/keyframes.json
+- analysis/visual-analysis.json
+- frames：纯文案模式已跳过
+
+## 来源时间点
+- 证据需要核对｜transcript｜1s｜原始证据
+"""
+    (project / f"analysis/{adapter.markdown_filename}").write_text(markdown, encoding="utf-8")
+    package = {
+        "metadata": {"title": "Text source"},
+        "transcript": {"segment_count": 1},
+        "keyframes": {"frame_count": 0},
+        "visual_analysis": {"frames": []},
+        "content_assets": content_assets,
+        "materials": {
+            "frame_paths": [],
+            "card_paths": [],
+            "toutiao_card_paths": [],
+            "frames_dir": str(project / "frames"),
+            "cards_dir": str(project / "cards"),
+            "toutiao_cards_dir": str(project / "toutiao-cards"),
+        },
+        "compliance": {"rights_boundary": "authorized"},
+        "warnings": [],
+        "quality": quality,
+        "platform": platform,
+        f"{platform}_quality_report": quality,
+    }
+    package["xiaohongshu_post" if platform == "xhs" else f"{platform}_post"] = post
+    write_json(project / "analysis/asset-package.json", package)
+    outputs = {
+        "metadata": "source/metadata.json",
+        "transcript": "transcript/transcript.json",
+        "keyframes": "analysis/keyframes.json",
+        "visual_analysis": "analysis/visual-analysis.json",
+        "run_metadata": "analysis/run-metadata.json",
+        "content_assets": "analysis/content-assets.json",
+        adapter.post_json_kind: f"analysis/{adapter.post_filename}",
+        adapter.post_md_kind: f"analysis/{adapter.markdown_filename}",
+        adapter.post_docx_kind: f"analysis/{adapter.docx_filename}",
+        adapter.quality_kind: f"analysis/{adapter.quality_filename}",
+        "asset_package": "analysis/asset-package.json",
+    }
+    project_record["outputs"] = outputs
     write_json(project / "project.json", project_record)
 
 
@@ -311,6 +516,94 @@ def test_verify_partial_failed_project(tmp_path: Path):
     assert result["summary"]["frame_files"] == 1
     assert result["summary"]["available_subtitle_languages"] == 1
     assert result["summary"]["automatic_caption_languages"] == 1
+
+
+@pytest.mark.parametrize("platform", ["xhs", "toutiao", "douyin", "bilibili"])
+def test_verify_text_only_article_completion_for_each_platform(tmp_path: Path, platform: str):
+    project = tmp_path / platform
+    _write_valid_text_article_project(project, platform)
+
+    result = verify_project(project)
+
+    assert result["ok"] is True
+    assert result["completed_ok"] is True
+    assert result["platform"] == platform
+    assert result["text_only"] is True
+    assert result["missing"] == []
+    assert result["issues"] == []
+    assert result["summary"]["frame_files"] == 0
+
+
+def test_verify_text_only_article_rejects_unmarked_empty_visual_artifacts(tmp_path: Path):
+    project = tmp_path / "unmarked"
+    _write_valid_text_article_project(project, "douyin")
+    keyframes = read_json(project / "analysis/keyframes.json")
+    keyframes.pop("skipped")
+    keyframes.pop("analysis_mode")
+    write_json(project / "analysis/keyframes.json", keyframes)
+
+    result = verify_project(project)
+
+    assert result["ok"] is False
+    assert any(issue["code"] == "text_only_keyframes_not_marked_skipped" for issue in result["issues"])
+
+
+def test_verify_text_only_allows_transcript_only_source_without_media_file(tmp_path: Path):
+    project = tmp_path / "subtitle-only"
+    _write_valid_text_article_project(project, "douyin")
+    metadata = read_json(project / "source/metadata.json")
+    metadata["video_file"] = None
+    metadata["subtitle_file"] = None
+    write_json(project / "source/metadata.json", metadata)
+
+    result = verify_project(project)
+
+    assert result["ok"] is True
+    assert result["completed_ok"] is True
+    assert result["issues"] == []
+
+
+def test_verify_text_only_rejects_unmarked_visual_analysis(tmp_path: Path):
+    project = tmp_path / "unmarked-visual"
+    _write_valid_text_article_project(project, "douyin")
+    visual = read_json(project / "analysis/visual-analysis.json")
+    visual.pop("skipped")
+    visual.pop("skip_reason")
+    write_json(project / "analysis/visual-analysis.json", visual)
+
+    result = verify_project(project)
+
+    assert result["ok"] is False
+    assert any(issue["code"] == "text_only_visual_not_marked_skipped" for issue in result["issues"])
+
+
+def test_verify_article_rejects_invalid_docx(tmp_path: Path):
+    project = tmp_path / "bad-docx"
+    _write_valid_text_article_project(project, "bilibili")
+    (project / "analysis/bilibili-article.docx").write_bytes(b"not-a-docx")
+
+    result = verify_project(project)
+
+    assert result["ok"] is False
+    assert any(issue["code"] == "invalid_docx" for issue in result["issues"])
+
+
+def test_verify_article_rejects_failed_quality_report(tmp_path: Path):
+    project = tmp_path / "bad-quality"
+    _write_valid_text_article_project(project, "toutiao")
+    quality = read_json(project / "analysis/toutiao-quality-report.json")
+    quality["passed"] = False
+    quality["violations"] = [{"code": "subheading_detected"}]
+    write_json(project / "analysis/toutiao-quality-report.json", quality)
+    package = read_json(project / "analysis/asset-package.json")
+    package["toutiao_quality_report"] = quality
+    write_json(project / "analysis/asset-package.json", package)
+
+    result = verify_project(project)
+
+    assert result["ok"] is False
+    issue_codes = {issue["code"] for issue in result["issues"]}
+    assert {"quality_report_failed", "quality_report_has_violations"} <= issue_codes
 
 
 def test_verify_completed_project_requires_downstream_outputs(tmp_path: Path):

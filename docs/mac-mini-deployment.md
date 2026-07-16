@@ -42,7 +42,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/up
 ```bash
 export YTXHS_PORT="8012"
 export YTXHS_APP_DIR="/opt/ytube-xhs"
-YTXHS_REF=macmini-v20260707.5 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
+YTXHS_REF=<发布页中的最新Tag> bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 ```
 
 固定更新脚本会自动下载 GitHub 源码包，再调用项目内 `deploy/macos/install_macos.sh` 完成本地依赖、虚拟环境和 launchd 服务安装；已有 `.env` 与 `runtime/` 不会被覆盖。
@@ -88,7 +88,7 @@ sudo deploy/macos/install_macos.sh \
 
 - 复制项目文件到 `/opt/ytube-xhs`
 - 创建 `.venv`
-- 安装 Python 依赖
+- 安装 Python 依赖，包括真实 Word `.docx` 导出所需的 `python-docx`
 - 默认安装 `faster-whisper`，用于无字幕视频转录
 - 安装/检查 `ffmpeg`、`tesseract`、`tesseract-lang`
 - 创建 `/opt/ytube-xhs/.env`
@@ -116,7 +116,23 @@ XHS_LLM_REQUIRE_API_KEY=auto
 XHS_LLM_TIMEOUT_MS=180000
 XHS_LLM_MAX_CHARS=120000
 XHS_LLM_MAX_TOKENS=6000
+XHS_LLM_RETRY_ATTEMPTS=3
+YTXHS_MAX_ANALYZE_WORKERS=1
+YTXHS_MAX_PRODUCE_WORKERS=3
 ```
+
+默认并发适合资源保守的 Mac mini：本地媒体/Whisper 分析 1 路、远程 LLM 文章生成 3 路。超过上限的任务显示排队位置；不要盲目提高分析并发，否则多个 Whisper/ffmpeg 任务会争抢内存和 CPU。
+
+使用官方 DeepSeek 时可直接配置：
+
+```env
+XHS_LLM_BASE_URL=https://api.deepseek.com
+XHS_LLM_MODEL=deepseek-chat
+XHS_LLM_REQUIRE_API_KEY=true
+XHS_LLM_API_KEY=你的官方DeepSeekKey
+```
+
+LLM 故障会区分鉴权、限流、超时、网络、HTTP 和响应结构问题；项目日志只保留脱敏摘要。`XHS_LLM_RETRY_ATTEMPTS` 范围为 1 至 10。
 
 如果使用外部生图 API：
 
@@ -177,6 +193,8 @@ sudo /opt/ytube-xhs/deploy/macos/manage.sh restart
 http://<Mac-mini-IP>:8012
 ```
 
+业务验收还应确认：四个平台均可选择；文章正文无小标题；生成结果可下载 JSON、Markdown、Word 和质量报告；从两个浏览器窗口同时提交不同平台文章时，任务状态互不覆盖；停止其中一个任务后另一个继续执行。
+
 ## 7. 日常运维
 
 ```bash
@@ -217,7 +235,7 @@ sudo /opt/ytube-xhs/deploy/macos/manage.sh recover
 /opt/ytube-xhs/deploy/macos/healthcheck.sh --base-url http://127.0.0.1:8012 --llm
 ```
 
-3. 定期恢复卡住任务：
+3. 服务启动时会立即把上次进程遗留的排队/运行任务恢复成带 partial package 的结构化失败，避免永久卡住。也可定期执行额外的陈旧任务巡检：
 
 ```bash
 /opt/ytube-xhs/.venv/bin/python /opt/ytube-xhs/scripts/recover_stale_projects.py --older-than-seconds 3600
@@ -251,3 +269,5 @@ sudo /opt/ytube-xhs/deploy/macos/manage.sh self-test
 sudo deploy/macos/install_macos.sh --app-dir /opt/ytube-xhs --port 8012 --service-user "$USER"
 sudo /opt/ytube-xhs/deploy/macos/manage.sh self-test
 ```
+
+`scripts/package_macos_deploy.sh` 在生成归档后会执行 `tar -tzf` 内容审计和 SHA256 自检；任何本地 `.env`、runtime 数据、虚拟环境、Git/缓存、Cookie 或疑似密钥文件进入包内都会令打包失败。

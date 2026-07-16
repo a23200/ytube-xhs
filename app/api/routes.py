@@ -16,7 +16,9 @@ from app.schemas.models import (
     ProjectCreated,
     ProjectImageGenerateRequest,
     ProjectProduceRequest,
+    ProjectStatus,
 )
+from app.services.article_quality import evaluate_article_quality, quality_error
 from app.services.contracts import validate_content_assets, validate_xhs_post
 from app.services.diagnostics import collect_diagnostics
 from app.services.errors import PipelineError
@@ -30,20 +32,30 @@ from app.services.pipeline import (
     run_project_downstream_pipeline,
     run_project_image_generation_pipeline,
     run_project_pipeline,
+    run_project_platform_produce_pipeline,
     run_project_produce_pipeline,
     run_project_toutiao_image_generation_pipeline,
     run_project_toutiao_produce_pipeline,
     run_project_visual_pipeline,
 )
+from app.services.platforms import get_platform, platform_keys, platform_values, public_platform_capabilities
 from app.services.project_verifier import verify_runtime_project
 from app.services.report_writer import write_reports
 from app.services.runtime_store import parse_time, read_json, store, write_json
+from app.services.task_manager import task_manager
 
 router = APIRouter(prefix="/api")
 FRAME_FILENAME_RE = re.compile(r"^frame_\d{4}\.jpg$")
 CARD_FILENAME_RE = re.compile(r"^(cover|summary|slide_\d{2})\.png$")
+DOCX_KIND_RE = re.compile(r"^(xhs|toutiao|douyin|bilibili)_post_docx$")
 
 STATUS_UI: dict[str, dict[str, Any]] = {
+    "queued": {
+        "label": "排队中",
+        "description": "任务已进入受控队列，等待可用执行槽位。",
+        "estimate_seconds": 1,
+        "outputs": [],
+    },
     "created": {
         "label": "任务已创建",
         "description": "任务已进入队列，准备开始获取视频。",
@@ -87,22 +99,40 @@ STATUS_UI: dict[str, dict[str, Any]] = {
         "outputs": ["content_assets", "asset_package"],
     },
     "producing_article": {
-        "label": "生成小红书稿",
-        "description": "正在根据已确认解析生成标题、正文、标签和配图计划。",
+        "label": "生成平台稿",
+        "description": "正在根据已确认解析生成目标平台文章。",
         "estimate_seconds": 45,
-        "outputs": ["xhs_post_json", "image_prompts"],
+        "outputs": [],
+    },
+    "validating_content": {
+        "label": "校验文章",
+        "description": "正在检查钩子、小标题、事实数据、重复片段和改写程度；不合格会定向重写。",
+        "estimate_seconds": 30,
+        "outputs": [],
     },
     "xhs_completed": {
         "label": "小红书稿完成",
-        "description": "文章、Markdown 和图片提示词已生成，下一步会调用生图 API 渲染 PNG 卡片。",
+        "description": "文章、Markdown、Word、质量报告和图片提示词已生成，下一步可调用生图 API 渲染 PNG 卡片。",
         "estimate_seconds": 1,
-        "outputs": ["xhs_post_json", "xhs_post_md", "image_prompts", "asset_package"],
+        "outputs": ["xhs_post_json", "xhs_post_md", "xhs_post_docx", "xhs_quality_report", "image_prompts", "asset_package"],
     },
     "toutiao_completed": {
         "label": "今日头条稿完成",
-        "description": "今日头条文章、Markdown 和图片提示词已生成，下一步会调用生图 API 渲染 PNG 卡片。",
+        "description": "今日头条文章、Markdown、Word、质量报告和图片提示词已生成，下一步可调用生图 API 渲染 PNG 卡片。",
         "estimate_seconds": 1,
-        "outputs": ["toutiao_post_json", "toutiao_post_md", "toutiao_image_prompts", "asset_package"],
+        "outputs": ["toutiao_post_json", "toutiao_post_md", "toutiao_post_docx", "toutiao_quality_report", "toutiao_image_prompts", "asset_package"],
+    },
+    "douyin_completed": {
+        "label": "抖音稿完成",
+        "description": "抖音口播文章、Markdown、Word 和质量报告已生成。",
+        "estimate_seconds": 1,
+        "outputs": ["douyin_post_json", "douyin_post_md", "douyin_post_docx", "douyin_quality_report", "asset_package"],
+    },
+    "bilibili_completed": {
+        "label": "哔哩哔哩稿完成",
+        "description": "哔哩哔哩文章、Markdown、Word 和质量报告已生成。",
+        "estimate_seconds": 1,
+        "outputs": ["bilibili_post_json", "bilibili_post_md", "bilibili_post_docx", "bilibili_quality_report", "asset_package"],
     },
     "writing_xhs": {
         "label": "写入文章文件",
@@ -128,10 +158,14 @@ STATUS_UI: dict[str, dict[str, Any]] = {
             "content_assets",
             "xhs_post_json",
             "xhs_post_md",
+            "xhs_post_docx",
+            "xhs_quality_report",
             "image_prompts",
             "image_cards",
             "toutiao_post_json",
             "toutiao_post_md",
+            "toutiao_post_docx",
+            "toutiao_quality_report",
             "toutiao_image_prompts",
             "toutiao_image_cards",
             "asset_package",
@@ -141,6 +175,12 @@ STATUS_UI: dict[str, dict[str, Any]] = {
     "failed": {
         "label": "处理失败",
         "description": "任务中断，请查看错误信息和已生成产物。",
+        "estimate_seconds": 1,
+        "outputs": [],
+    },
+    "stopped": {
+        "label": "已停止",
+        "description": "任务已由用户强制停止，已有中间产物保留。",
         "estimate_seconds": 1,
         "outputs": [],
     },
@@ -203,14 +243,44 @@ PLATFORM_STATUS_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
     },
 }
 
+for _adapter in platform_values():
+    _platform_outputs = _adapter.output_kinds(include_images=False)
+    PLATFORM_STATUS_OVERRIDES.setdefault(_adapter.key, {}).update(
+        {
+            "queued": {
+                "label": f"{_adapter.name}任务排队中",
+                "description": "任务正在等待文章生成执行槽位。",
+                "outputs": [],
+            },
+            "producing_article": {
+                "label": f"生成{_adapter.name}稿",
+                "description": f"正在生成{_adapter.name}标题、开头钩子和连续自然段正文。",
+                "outputs": [_adapter.post_json_kind],
+            },
+            "validating_content": {
+                "label": f"校验{_adapter.name}稿",
+                "description": "正在校验无小标题、钩子、来源数据和改写程度。",
+                "outputs": [_adapter.post_json_kind, _adapter.quality_kind],
+            },
+            _adapter.completed_status.value: {
+                "label": f"{_adapter.name}稿完成",
+                "description": f"{_adapter.name}文章、Markdown、Word 和质量报告已生成。",
+                "outputs": [*_platform_outputs, "asset_package"],
+            },
+        }
+    )
+
 ANALYZE_FLOW = ["created", "ingesting", "transcribing", "extracting_frames", "analyzing_visuals", "planning_content", "analysis_completed"]
-PRODUCE_FLOW = ["producing_article", "xhs_completed"]
-TOUTIAO_PRODUCE_FLOW = ["producing_article", "toutiao_completed"]
 IMAGE_GENERATION_FLOW = ["rendering_cards", "completed"]
 LEGACY_PRODUCE_FLOW = ["writing_xhs", "rendering_cards", "completed"]
-PRODUCE_STATUSES = {"producing_article", "xhs_completed", "toutiao_completed"}
+PLATFORM_COMPLETED_STATUSES = {adapter.completed_status.value for adapter in platform_values()}
+PRODUCE_STATUSES = {"queued", "producing_article", "validating_content", *PLATFORM_COMPLETED_STATUSES}
 IMAGE_GENERATION_STATUSES = {"rendering_cards", "completed"}
 LEGACY_PRODUCE_STATUSES = {"writing_xhs", "rendering_cards", "completed"}
+
+
+def _produce_flow(platform: str) -> list[str]:
+    return ["queued", "producing_article", "validating_content", get_platform(platform).completed_status.value]
 
 
 def _get_existing_project(project_id: str):
@@ -388,7 +458,7 @@ def _platform_from_details(value: Any) -> Optional[str]:
     if not isinstance(value, dict):
         return None
     platform = value.get("platform")
-    if platform in {"xhs", "toutiao"}:
+    if platform in platform_keys():
         return str(platform)
     nested = value.get("details")
     if isinstance(nested, dict):
@@ -398,16 +468,21 @@ def _platform_from_details(value: Any) -> Optional[str]:
 
 def _message_platform(message: Any) -> Optional[str]:
     text = str(message or "")
-    if "Toutiao" in text or "今日头条" in text:
-        return "toutiao"
-    if "Xiaohongshu" in text or "XHS" in text or "小红书" in text:
-        return "xhs"
+    aliases = {
+        "xhs": ("Xiaohongshu", "XHS", "小红书"),
+        "toutiao": ("Toutiao", "今日头条"),
+        "douyin": ("Douyin", "抖音"),
+        "bilibili": ("Bilibili", "哔哩哔哩", "B站"),
+    }
+    for platform, markers in aliases.items():
+        if any(marker in text for marker in markers):
+            return platform
     return None
 
 
 def _last_logged_platform(record: Any) -> Optional[str]:
     error_platform = _platform_from_details(record.error)
-    if _status_value(record.status) == "failed" and error_platform:
+    if _status_value(record.status) in {"failed", "stopped"} and error_platform:
         return error_platform
     for log in reversed(record.logs):
         platform = _platform_from_details(getattr(log, "details", None)) or _message_platform(getattr(log, "message", ""))
@@ -417,23 +492,22 @@ def _last_logged_platform(record: Any) -> Optional[str]:
 
 
 def _record_platform(record: Any) -> str:
+    configured = getattr(record, "target_platform", None)
+    if configured in platform_keys():
+        return str(configured)
     status = _status_value(record.status)
-    if status == "toutiao_completed":
-        return "toutiao"
-    if status == "xhs_completed":
-        return "xhs"
+    for adapter in platform_values():
+        if status == adapter.completed_status.value:
+            return adapter.key
 
     logged_platform = _last_logged_platform(record)
-    if status in {"producing_article", "rendering_cards", "completed", "failed"} and logged_platform:
+    if status in {"queued", "producing_article", "validating_content", "rendering_cards", "completed", "failed", "stopped"} and logged_platform:
         return logged_platform
 
     outputs = record.outputs or {}
-    toutiao_outputs = any(outputs.get(kind) for kind in ("toutiao_post_json", "toutiao_post_md", "toutiao_image_prompts", "toutiao_image_cards"))
-    xhs_outputs = any(outputs.get(kind) for kind in ("xhs_post_json", "xhs_post_md", "image_prompts", "image_cards"))
-    if toutiao_outputs and not xhs_outputs:
-        return "toutiao"
-    if xhs_outputs and not toutiao_outputs:
-        return "xhs"
+    platforms_with_outputs = [adapter.key for adapter in platform_values() if any(outputs.get(kind) for kind in adapter.output_kinds())]
+    if len(platforms_with_outputs) == 1:
+        return platforms_with_outputs[0]
     return logged_platform or "xhs"
 
 
@@ -463,19 +537,62 @@ def _seconds_between(start: Optional[datetime], end: Optional[datetime]) -> Opti
     return max(0.0, (end - start).total_seconds())
 
 
-def _first_log_time(record: Any, status: str) -> Optional[datetime]:
-    for log in record.logs:
+def _log_platform(log: Any) -> Optional[str]:
+    return _platform_from_details(getattr(log, "details", None)) or _message_platform(getattr(log, "message", ""))
+
+
+def _log_scope(log: Any) -> Optional[str]:
+    details = getattr(log, "details", None)
+    if not isinstance(details, dict):
+        return None
+    scope = details.get("scope")
+    return str(scope) if scope else None
+
+
+def _progress_logs(record: Any, mode: str, platform: str) -> list[Any]:
+    logs = list(record.logs)
+    if mode == "produce":
+        for index in range(len(logs) - 1, -1, -1):
+            log = logs[index]
+            if (
+                _status_value(log.status) == "queued"
+                and _log_scope(log) == "produce"
+                and _log_platform(log) == platform
+            ):
+                return logs[index:]
+        for index in range(len(logs) - 1, -1, -1):
+            log = logs[index]
+            if _status_value(log.status) in {"producing_article", "writing_xhs"} and _log_platform(log) == platform:
+                return logs[index:]
+    elif mode == "image_generation":
+        for index in range(len(logs) - 1, -1, -1):
+            log = logs[index]
+            if (
+                _status_value(log.status) == "rendering_cards"
+                and _log_scope(log) == "image_generation"
+                and _log_platform(log) == platform
+            ):
+                return logs[index:]
+        for index in range(len(logs) - 1, -1, -1):
+            log = logs[index]
+            if _status_value(log.status) == "rendering_cards" and _log_platform(log) == platform:
+                return logs[index:]
+    return logs
+
+
+def _first_log_time(logs: list[Any], status: str) -> Optional[datetime]:
+    for log in logs:
         if _status_value(log.status) == status:
             return _safe_parse_time(log.time)
     return None
 
 
-def _next_distinct_log_time(record: Any, flow: list[str], status: str) -> Optional[datetime]:
+def _next_distinct_log_time(logs: list[Any], flow: list[str], status: str) -> Optional[datetime]:
     statuses_after = set(flow[flow.index(status) + 1 :]) if status in flow else set()
     if not statuses_after:
         return None
     first_seen = False
-    for log in record.logs:
+    for log in logs:
         log_status = _status_value(log.status)
         if log_status == status:
             first_seen = True
@@ -491,19 +608,22 @@ def _progress_flow(record: Any) -> tuple[str, str, list[str], str]:
     error_step = str((record.error or {}).get("step") or "")
     output_kinds = record.outputs or {}
     platform = _record_platform(record)
-    toutiao_seen = platform == "toutiao" or bool(output_kinds.get("toutiao_post_json") or output_kinds.get("toutiao_image_cards"))
-    produce_seen = bool(logged_statuses & PRODUCE_STATUSES or output_kinds.get("xhs_post_json") or output_kinds.get("toutiao_post_json"))
+    adapter = get_platform(platform)
+    produce_seen = bool(logged_statuses & PRODUCE_STATUSES or any(output_kinds.get(item.post_json_kind) for item in platform_values()))
     image_generation_seen = bool(logged_statuses & IMAGE_GENERATION_STATUSES or output_kinds.get("image_cards") or output_kinds.get("toutiao_image_cards"))
     legacy_full_pipeline = "writing_xhs" in logged_statuses and "producing_article" not in logged_statuses
+
+    if status == "queued" and not _last_logged_platform(record):
+        return "analyze", "解析进度", ["queued", *ANALYZE_FLOW], platform
 
     if status == "analysis_completed":
         return "analyze", "解析进度", ANALYZE_FLOW, platform
     if legacy_full_pipeline and (status in LEGACY_PRODUCE_STATUSES or error_step in LEGACY_PRODUCE_STATUSES):
         return "produce", "图文产出进度", LEGACY_PRODUCE_FLOW, platform
-    if status == "toutiao_completed":
-        return "produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW, "toutiao"
+    if status in PLATFORM_COMPLETED_STATUSES:
+        return "produce", f"{adapter.name}稿进度", _produce_flow(platform), platform
     if status in PRODUCE_STATUSES or (status == "failed" and error_step in PRODUCE_STATUSES):
-        return ("produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW, "toutiao") if toutiao_seen else ("produce", "小红书稿进度", PRODUCE_FLOW, "xhs")
+        return "produce", f"{adapter.name}稿进度", _produce_flow(platform), platform
     if status in IMAGE_GENERATION_STATUSES or (status == "failed" and error_step in IMAGE_GENERATION_STATUSES):
         mode_label = "今日头条生图进度" if platform == "toutiao" else "生图进度"
         return "image_generation", mode_label, IMAGE_GENERATION_FLOW, platform
@@ -511,17 +631,17 @@ def _progress_flow(record: Any) -> tuple[str, str, list[str], str]:
         mode_label = "今日头条生图进度" if platform == "toutiao" else "生图进度"
         return "image_generation", mode_label, IMAGE_GENERATION_FLOW, platform
     if status == "completed" and produce_seen:
-        return ("produce", "今日头条稿进度", TOUTIAO_PRODUCE_FLOW, "toutiao") if platform == "toutiao" else ("produce", "小红书稿进度", PRODUCE_FLOW, "xhs")
+        return "produce", f"{adapter.name}稿进度", _produce_flow(platform), platform
     return "analyze", "解析进度", ANALYZE_FLOW, platform
 
 
-def _active_progress_step(record: Any, flow: list[str]) -> str:
+def _active_progress_step(record: Any, flow: list[str], logs: list[Any]) -> str:
     status = _status_value(record.status)
-    if status == "failed":
+    if status in {"failed", "stopped"}:
         error_step = str((record.error or {}).get("step") or "")
         if error_step in flow:
             return error_step
-        for log in reversed(record.logs):
+        for log in reversed(logs):
             log_status = _status_value(log.status)
             if log_status in flow:
                 return log_status
@@ -533,43 +653,52 @@ def _active_progress_step(record: Any, flow: list[str]) -> str:
     return flow[0]
 
 
-def _stage_elapsed_seconds(record: Any, flow: list[str], step: str, now: datetime) -> Optional[float]:
-    started_at = _first_log_time(record, step)
+def _stage_elapsed_seconds(record: Any, logs: list[Any], flow: list[str], step: str, now: datetime) -> Optional[float]:
+    started_at = _first_log_time(logs, step)
     if not started_at:
         return None
-    ended_at = _next_distinct_log_time(record, flow, step)
-    if ended_at is None and _status_value(record.status) in {"completed", "analysis_completed", "xhs_completed", "toutiao_completed", "failed"}:
+    ended_at = _next_distinct_log_time(logs, flow, step)
+    terminal_statuses = {"completed", "analysis_completed", "failed", "stopped", *PLATFORM_COMPLETED_STATUSES}
+    if ended_at is None and _status_value(record.status) in terminal_statuses:
         ended_at = _safe_parse_time(record.updated_at)
     return _seconds_between(started_at, ended_at or now)
 
 
 def _build_project_progress(record: Any) -> dict[str, Any]:
     mode, mode_label, flow, platform = _progress_flow(record)
+    progress_logs = _progress_logs(record, mode, platform)
     status = _status_value(record.status)
-    active_step = _active_progress_step(record, flow)
+    active_step = _active_progress_step(record, flow, progress_logs)
     active_index = flow.index(active_step) if active_step in flow else 0
     now = datetime.now(timezone.utc)
     outputs = record.outputs or {}
 
     started_at = _safe_parse_time(record.created_at)
     if mode == "produce":
-        started_at = _first_log_time(record, "producing_article") or _first_log_time(record, "writing_xhs") or started_at
+        started_at = (
+            _first_log_time(progress_logs, "queued")
+            or _first_log_time(progress_logs, "producing_article")
+            or _first_log_time(progress_logs, "writing_xhs")
+            or started_at
+        )
     if mode == "image_generation":
-        started_at = _first_log_time(record, "rendering_cards") or started_at
+        started_at = _first_log_time(progress_logs, "rendering_cards") or started_at
     updated_at = _safe_parse_time(record.updated_at) or now
-    elapsed_seconds = _seconds_between(started_at, now if status not in {"completed", "analysis_completed", "xhs_completed", "toutiao_completed", "failed"} else updated_at)
+    terminal_statuses = {"completed", "analysis_completed", "failed", "stopped", *PLATFORM_COMPLETED_STATUSES}
+    elapsed_seconds = _seconds_between(started_at, now if status not in terminal_statuses else updated_at)
 
     total_estimate = sum(float(_status_ui_for_step(step, platform)["estimate_seconds"]) for step in flow)
     completed_weight = sum(float(_status_ui_for_step(step, platform)["estimate_seconds"]) for step in flow[:active_index])
     active_estimate = float(_status_ui_for_step(active_step, platform)["estimate_seconds"])
-    active_elapsed = _stage_elapsed_seconds(record, flow, active_step, now) or 0.0
+    active_elapsed = _stage_elapsed_seconds(record, progress_logs, flow, active_step, now) or 0.0
     active_fraction = min(0.92, active_elapsed / max(active_estimate, 1.0))
 
-    if status in {"completed", "analysis_completed", "xhs_completed", "toutiao_completed"} and active_step == flow[-1]:
+    terminal_successes = {"completed", "analysis_completed", *PLATFORM_COMPLETED_STATUSES}
+    if status in terminal_successes and active_step == flow[-1]:
         percent = 100
         remaining_seconds: Optional[float] = 0.0
         eta_confidence = "complete"
-    elif status == "failed":
+    elif status in {"failed", "stopped"}:
         percent = round(min(99.0, ((completed_weight + active_estimate * 0.5) / max(total_estimate, 1.0)) * 100))
         remaining_seconds = None
         eta_confidence = "failed"
@@ -586,9 +715,9 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
     completed_steps = 0
     for index, step in enumerate(flow):
         ui = _status_ui_for_step(step, platform)
-        if status == "failed" and step == active_step:
-            step_state = "failed"
-        elif status in {"completed", "analysis_completed", "xhs_completed", "toutiao_completed"} and step == flow[-1]:
+        if status in {"failed", "stopped"} and step == active_step:
+            step_state = "stopped" if status == "stopped" else "failed"
+        elif status in terminal_successes and step == flow[-1]:
             step_state = "done"
         elif index < active_index:
             step_state = "done"
@@ -603,7 +732,7 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
             expected_outputs = [
                 kind
                 for kind in expected_outputs
-                if kind not in {"image_prompts", "image_cards", "toutiao_image_prompts", "toutiao_image_cards"}
+                if kind not in {item for adapter_item in platform_values() for item in [adapter_item.image_prompts_kind, adapter_item.image_cards_kind]}
             ]
         ready_outputs = [kind for kind in expected_outputs if outputs.get(kind)]
         steps.append(
@@ -612,7 +741,7 @@ def _build_project_progress(record: Any) -> dict[str, Any]:
                 "label": ui["label"],
                 "description": ui["description"],
                 "state": step_state,
-                "elapsed_seconds": _stage_elapsed_seconds(record, flow, step, now),
+                "elapsed_seconds": _stage_elapsed_seconds(record, progress_logs, flow, step, now),
                 "estimated_seconds": ui["estimate_seconds"],
                 "outputs_ready": len(ready_outputs),
                 "outputs_expected": len(expected_outputs),
@@ -693,18 +822,74 @@ def image_self_test(real: bool = False) -> dict:
     return image_client.self_test(real=real)
 
 
+@router.get("/platforms")
+def list_platforms() -> dict:
+    return {"platforms": public_platform_capabilities()}
+
+
+def _queue_details(project_id: str, scope: str, platform: Optional[str], position: int) -> None:
+    label = get_platform(platform).name if platform else "解析"
+    store.set_status(
+        project_id,
+        ProjectStatus.queued,
+        f"{label} task is waiting for an execution slot.",
+        {"scope": scope, "platform": platform, "queue_position": position},
+    )
+
+
+def _submit_project_task(
+    scope: str,
+    project_id: str,
+    target: Any,
+    *args: Any,
+    platform: Optional[str] = None,
+) -> dict:
+    try:
+        return task_manager.submit(
+            scope,
+            project_id,
+            target,
+            *args,
+            platform=platform,
+            on_queued=lambda position: _queue_details(project_id, scope, platform, position),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "project_busy", "message": str(exc), "status": _get_existing_project(project_id).status},
+        ) from exc
+
+
 @router.post("/projects", response_model=ProjectCreated)
 def create_project(request: ProjectCreate, background_tasks: BackgroundTasks) -> ProjectCreated:
     record = store.create(request)
-    background_tasks.add_task(run_project_pipeline, record.project_id)
-    return ProjectCreated(project_id=record.project_id, status=record.status)
+    _submit_project_task(
+        "analyze",
+        record.project_id,
+        run_project_pipeline,
+        platform=record.target_platform,
+    )
+    return ProjectCreated(
+        project_id=record.project_id,
+        status=record.status,
+        target_platform=record.target_platform,
+    )
 
 
 @router.post("/projects/analyze", response_model=ProjectCreated)
 def analyze_project(request: ProjectCreate, background_tasks: BackgroundTasks) -> ProjectCreated:
     record = store.create(request)
-    background_tasks.add_task(run_project_analysis_pipeline, record.project_id)
-    return ProjectCreated(project_id=record.project_id, status=record.status)
+    _submit_project_task(
+        "analyze",
+        record.project_id,
+        run_project_analysis_pipeline,
+        platform=record.target_platform,
+    )
+    return ProjectCreated(
+        project_id=record.project_id,
+        status=record.status,
+        target_platform=record.target_platform,
+    )
 
 
 @router.post("/projects/{project_id}/produce")
@@ -762,7 +947,7 @@ def produce_project(project_id: str, background_tasks: BackgroundTasks, request:
             status_code=409,
             detail={"code": "project_busy", "message": "Project is not ready to produce.", "status": record.status},
         )
-    background_tasks.add_task(run_project_produce_pipeline, project_id)
+    _submit_project_task("produce", project_id, run_project_produce_pipeline, platform="xhs")
     return {"project_id": project_id, "status": "queued", "scope": "produce"}
 
 
@@ -821,8 +1006,90 @@ def produce_project_toutiao(project_id: str, background_tasks: BackgroundTasks, 
             status_code=409,
             detail={"code": "project_busy", "message": "Project is not ready to produce Toutiao content.", "status": record.status},
         )
-    background_tasks.add_task(run_project_toutiao_produce_pipeline, project_id)
+    _submit_project_task("produce", project_id, run_project_toutiao_produce_pipeline, platform="toutiao")
     return {"project_id": project_id, "status": "queued", "scope": "produce", "platform": "toutiao"}
+
+
+@router.post("/projects/{project_id}/produce/platform/{platform}")
+def produce_project_for_platform(
+    project_id: str,
+    platform: str,
+    request: Optional[ProjectProduceRequest] = None,
+) -> dict:
+    try:
+        adapter = get_platform(platform)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "unsupported_platform", "message": str(exc), "supported": list(platform_keys())},
+        ) from exc
+    _get_existing_project(project_id)
+    paths = store.paths(project_id)
+    if request and request.content_assets is not None:
+        _metadata, transcript, keyframes, _visual = _load_upstream_project_payloads(project_id)
+        try:
+            validated = validate_content_assets(request.content_assets)
+            from app.services.source_anchors import validate_content_asset_anchors
+
+            validate_content_asset_anchors(validated, transcript, keyframes, paths)
+        except PipelineError as exc:
+            raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
+        write_json(paths.analysis_dir / "content-assets.json", validated)
+        store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
+
+    if not store.can_start_produce(project_id):
+        record = _get_existing_project(project_id)
+        missing_inputs = store.produce_missing_inputs(project_id)
+        if missing_inputs:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "produce_artifacts_missing",
+                    "message": f"Project is missing required Analyze artifacts for {adapter.name} Produce.",
+                    "status": record.status,
+                    "missing": missing_inputs,
+                    "platform": adapter.key,
+                },
+            )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "project_busy",
+                "message": f"Project is not ready to produce {adapter.name} content.",
+                "status": record.status,
+                "platform": adapter.key,
+            },
+        )
+    try:
+        llm_client.ensure_available("producing_article")
+    except PipelineError as exc:
+        raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
+    started, record, missing_inputs = store.try_start_platform_produce(project_id, platform=adapter.key)
+    if not started:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "project_busy" if not missing_inputs else "produce_artifacts_missing",
+                "message": f"Project is not ready to produce {adapter.name} content.",
+                "status": record.status,
+                "missing": missing_inputs,
+                "platform": adapter.key,
+            },
+        )
+    result = _submit_project_task(
+        "produce",
+        project_id,
+        run_project_platform_produce_pipeline,
+        adapter.key,
+        platform=adapter.key,
+    )
+    return {
+        "project_id": project_id,
+        "status": "queued" if result["queued"] else "started",
+        "scope": "produce",
+        "platform": adapter.key,
+        "queue_position": result["queue_position"],
+    }
 
 
 @router.post("/projects/{project_id}/generate-images")
@@ -881,7 +1148,7 @@ def generate_project_images(project_id: str, background_tasks: BackgroundTasks, 
         )
 
     style = (request.style if request else None) or "clean"
-    background_tasks.add_task(run_project_image_generation_pipeline, project_id, style)
+    _submit_project_task("produce", project_id, run_project_image_generation_pipeline, style, platform="xhs")
     return {"project_id": project_id, "status": "queued", "scope": "image_generation"}
 
 
@@ -946,7 +1213,7 @@ def generate_project_toutiao_images(project_id: str, background_tasks: Backgroun
         )
 
     style = (request.style if request else None) or "clean"
-    background_tasks.add_task(run_project_toutiao_image_generation_pipeline, project_id, style)
+    _submit_project_task("produce", project_id, run_project_toutiao_image_generation_pipeline, style, platform="toutiao")
     return {"project_id": project_id, "status": "queued", "scope": "image_generation", "platform": "toutiao"}
 
 
@@ -969,30 +1236,25 @@ def update_content_assets(project_id: str, payload: Dict[str, Any]) -> dict:
 
 @router.patch("/projects/{project_id}/xhs-post")
 def update_xhs_post(project_id: str, payload: Dict[str, Any]) -> dict:
-    paths = _paths_for_existing_project(project_id)
-    metadata, transcript, keyframes, visual, assets = _load_required_project_payloads(project_id)
-    try:
-        require_frame_anchors = bool(keyframes.get("keyframes"))
-        validated = validate_xhs_post(payload, require_frame_anchors=require_frame_anchors)
-        from app.services.source_anchors import validate_xhs_post_anchors
-
-        if require_frame_anchors:
-            validate_xhs_post_anchors(validated, keyframes, paths)
-    except PipelineError as exc:
-        raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
-    write_json(paths.analysis_dir / "xiaohongshu-post.json", validated)
-    store.add_output(project_id, "xhs_post_json", paths.analysis_dir / "xiaohongshu-post.json")
-    prompts = read_json(paths.analysis_dir / "image-prompts.json") if (paths.analysis_dir / "image-prompts.json").exists() else {"image_prompts": []}
-    image_cards = read_json(paths.analysis_dir / "image-cards.json") if (paths.analysis_dir / "image-cards.json").exists() else {}
-    write_reports(metadata, transcript, keyframes, visual, assets, validated, prompts, paths, _get_existing_project(project_id).warnings, image_cards=image_cards)
-    store.add_output(project_id, "xhs_post_md", paths.analysis_dir / "xhs-post.md")
-    store.add_output(project_id, "asset_package", paths.analysis_dir / "asset-package.json")
-    store.log(project_id, _get_existing_project(project_id).status, "XHS post updated from workbench.", details={"artifact": "xiaohongshu-post.json"})
-    return {"project_id": project_id, "kind": "xhs_post_json", "saved": True}
+    return _update_platform_post(project_id, "xhs", payload)
 
 
 @router.patch("/projects/{project_id}/toutiao-post")
 def update_toutiao_post(project_id: str, payload: Dict[str, Any]) -> dict:
+    return _update_platform_post(project_id, "toutiao", payload)
+
+
+@router.patch("/projects/{project_id}/platform/{platform}/post")
+def update_platform_post(project_id: str, platform: str, payload: Dict[str, Any]) -> dict:
+    try:
+        get_platform(platform)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"code": "unsupported_platform", "message": str(exc)}) from exc
+    return _update_platform_post(project_id, platform, payload)
+
+
+def _update_platform_post(project_id: str, platform: str, payload: Dict[str, Any]) -> dict:
+    adapter = get_platform(platform)
     paths = _paths_for_existing_project(project_id)
     metadata, transcript, keyframes, visual, assets = _load_required_project_payloads(project_id)
     try:
@@ -1002,17 +1264,50 @@ def update_toutiao_post(project_id: str, payload: Dict[str, Any]) -> dict:
 
         if require_frame_anchors:
             validate_xhs_post_anchors(validated, keyframes, paths)
+        report = evaluate_article_quality(validated, assets, transcript, platform=adapter.key)
+        if not report["passed"]:
+            raise quality_error(report)
     except PipelineError as exc:
         raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
-    write_json(paths.analysis_dir / "toutiao-post.json", validated)
-    store.add_output(project_id, "toutiao_post_json", paths.analysis_dir / "toutiao-post.json")
-    prompts = read_json(paths.analysis_dir / "toutiao-image-prompts.json") if (paths.analysis_dir / "toutiao-image-prompts.json").exists() else {"image_prompts": []}
-    image_cards = read_json(paths.analysis_dir / "toutiao-image-cards.json") if (paths.analysis_dir / "toutiao-image-cards.json").exists() else {}
-    write_reports(metadata, transcript, keyframes, visual, assets, validated, prompts, paths, _get_existing_project(project_id).warnings, image_cards=image_cards, platform="toutiao")
-    store.add_output(project_id, "toutiao_post_md", paths.analysis_dir / "toutiao-post.md")
+    validated["platform"] = adapter.key
+    validated["platform_name"] = adapter.name
+    validated["quality"] = {
+        "estimated_rewrite_degree": report["similarity"]["estimated_rewrite_degree"],
+        "rewrite_count": 0,
+        "report": adapter.quality_filename,
+        "note": report["policy"]["originality_note"],
+    }
+    write_json(paths.analysis_dir / adapter.post_filename, validated)
+    write_json(paths.analysis_dir / adapter.quality_filename, report)
+    store.add_output(project_id, adapter.post_json_kind, paths.analysis_dir / adapter.post_filename)
+    store.add_output(project_id, adapter.quality_kind, paths.analysis_dir / adapter.quality_filename)
+    prompts_path = paths.analysis_dir / adapter.image_prompts_filename
+    cards_path = paths.analysis_dir / adapter.image_cards_filename
+    prompts = read_json(prompts_path) if adapter.supports_images and prompts_path.exists() else {"image_prompts": []}
+    image_cards = read_json(cards_path) if adapter.supports_images and cards_path.exists() else {}
+    write_reports(
+        metadata,
+        transcript,
+        keyframes,
+        visual,
+        assets,
+        validated,
+        prompts,
+        paths,
+        _get_existing_project(project_id).warnings,
+        image_cards=image_cards,
+        platform=adapter.key,
+    )
+    store.add_output(project_id, adapter.post_md_kind, paths.analysis_dir / adapter.markdown_filename)
+    store.add_output(project_id, adapter.post_docx_kind, paths.analysis_dir / adapter.docx_filename)
     store.add_output(project_id, "asset_package", paths.analysis_dir / "asset-package.json")
-    store.log(project_id, _get_existing_project(project_id).status, "Toutiao post updated from workbench.", details={"artifact": "toutiao-post.json"})
-    return {"project_id": project_id, "kind": "toutiao_post_json", "saved": True}
+    store.log(
+        project_id,
+        _get_existing_project(project_id).status,
+        f"{adapter.name} post updated from workbench and passed quality validation.",
+        details={"artifact": adapter.post_filename, "platform": adapter.key},
+    )
+    return {"project_id": project_id, "kind": adapter.post_json_kind, "saved": True, "quality": report}
 
 
 @router.patch("/projects/{project_id}/image-cards")
@@ -1098,7 +1393,7 @@ def update_toutiao_image_cards(project_id: str, payload: Dict[str, Any]) -> dict
 
 @router.post("/projects/{project_id}/rerun/downstream")
 def rerun_project_downstream(project_id: str, background_tasks: BackgroundTasks) -> dict:
-    _get_existing_project(project_id)
+    existing = _get_existing_project(project_id)
     started, record, missing_inputs = store.try_start_downstream_rerun(project_id)
     if not started:
         if missing_inputs:
@@ -1119,13 +1414,23 @@ def rerun_project_downstream(project_id: str, background_tasks: BackgroundTasks)
                 "status": record.status,
             },
         )
-    background_tasks.add_task(run_project_downstream_pipeline, project_id)
-    return {"project_id": project_id, "status": "queued", "scope": "downstream"}
+    _submit_project_task(
+        "analyze",
+        project_id,
+        run_project_downstream_pipeline,
+        platform=existing.target_platform,
+    )
+    return {
+        "project_id": project_id,
+        "status": "queued",
+        "scope": "downstream",
+        "platform": existing.target_platform,
+    }
 
 
 @router.post("/projects/{project_id}/rerun/visuals")
 def rerun_project_visuals(project_id: str, background_tasks: BackgroundTasks) -> dict:
-    _get_existing_project(project_id)
+    existing = _get_existing_project(project_id)
     started, record, missing_inputs = store.try_start_visual_rerun(project_id)
     if not started:
         if missing_inputs:
@@ -1146,8 +1451,18 @@ def rerun_project_visuals(project_id: str, background_tasks: BackgroundTasks) ->
                 "status": record.status,
             },
         )
-    background_tasks.add_task(run_project_visual_pipeline, project_id)
-    return {"project_id": project_id, "status": "queued", "scope": "visuals_and_downstream"}
+    _submit_project_task(
+        "analyze",
+        project_id,
+        run_project_visual_pipeline,
+        platform=existing.target_platform,
+    )
+    return {
+        "project_id": project_id,
+        "status": "queued",
+        "scope": "visuals_and_downstream",
+        "platform": existing.target_platform,
+    }
 
 
 @router.get("/projects")
@@ -1182,18 +1497,21 @@ def delete_project(project_id: str) -> dict:
 def cancel_project(project_id: str) -> dict:
     _get_existing_project(project_id)
     record = store.cancel(project_id)
+    execution = task_manager.cancel(project_id)
     if record.error and record.error.get("code") == "user_stopped":
         return {
             "project_id": record.project_id,
             "status": record.status,
             "cancelled": True,
             "error": record.error,
+            "execution": execution,
         }
     return {
         "project_id": record.project_id,
         "status": record.status,
         "cancelled": False,
         "message": "Project is not running.",
+        "execution": execution,
     }
 
 
@@ -1201,10 +1519,37 @@ def cancel_project(project_id: str) -> dict:
 def get_project_status(project_id: str) -> dict:
     record = _get_existing_project(project_id)
     progress = _build_project_progress(record)
+    execution = task_manager.snapshot(project_id)
     current_status_ui = _status_ui_for_step(_status_value(record.status), str(progress.get("platform") or "xhs"))
+    produce_missing = store.produce_missing_inputs(project_id)
+    can_produce = store.can_start_produce(project_id)
+    routes = {}
+    for adapter in platform_values():
+        can_generate_images = adapter.supports_images and store.can_start_platform_image_generation(project_id, adapter.key)
+        image_missing = store.platform_image_generation_missing_inputs(project_id, adapter.key) if adapter.supports_images else []
+        routes[adapter.key] = {
+            "platform": adapter.key,
+            "name": adapter.name,
+            "can_produce": can_produce,
+            "produce_missing_inputs": produce_missing,
+            "supports_image_generation": adapter.supports_images,
+            "can_generate_images": can_generate_images,
+            "image_generation_missing_inputs": image_missing,
+            "automatic_publish": adapter.automatic_publish,
+            "authorization_note": "自动发布尚未接入；只支持合法来源分析、平台格式生成和文件导出。",
+            "outputs": {
+                "post_json": record.outputs.get(adapter.post_json_kind),
+                "post_md": record.outputs.get(adapter.post_md_kind),
+                "post_docx": record.outputs.get(adapter.post_docx_kind),
+                "quality_report": record.outputs.get(adapter.quality_kind),
+                "image_prompts": record.outputs.get(adapter.image_prompts_kind) if adapter.supports_images else None,
+                "image_cards": record.outputs.get(adapter.image_cards_kind) if adapter.supports_images else None,
+            },
+        }
     return {
         "project_id": record.project_id,
         "status": record.status,
+        "target_platform": record.target_platform,
         "text_only": record.text_only,
         "status_label": current_status_ui["label"],
         "status_description": current_status_ui["description"],
@@ -1214,6 +1559,7 @@ def get_project_status(project_id: str) -> dict:
         "outputs": record.outputs,
         "warnings": record.warnings,
         "progress": progress,
+        "execution": execution,
         "can_cancel": store.can_cancel(project_id),
         "can_rerun_downstream": store.can_start_downstream_rerun(project_id),
         "downstream_rerun_missing_inputs": store.downstream_rerun_missing_inputs(project_id),
@@ -1221,32 +1567,7 @@ def get_project_status(project_id: str) -> dict:
         "produce_missing_inputs": store.produce_missing_inputs(project_id),
         "can_generate_images": store.can_start_image_generation(project_id),
         "image_generation_missing_inputs": store.image_generation_missing_inputs(project_id),
-        "routes": {
-            "xhs": {
-                "can_produce": store.can_start_produce(project_id),
-                "produce_missing_inputs": store.produce_missing_inputs(project_id),
-                "can_generate_images": store.can_start_platform_image_generation(project_id, "xhs"),
-                "image_generation_missing_inputs": store.platform_image_generation_missing_inputs(project_id, "xhs"),
-                "outputs": {
-                    "post_json": record.outputs.get("xhs_post_json"),
-                    "post_md": record.outputs.get("xhs_post_md"),
-                    "image_prompts": record.outputs.get("image_prompts"),
-                    "image_cards": record.outputs.get("image_cards"),
-                },
-            },
-            "toutiao": {
-                "can_produce": store.can_start_produce(project_id),
-                "produce_missing_inputs": store.produce_missing_inputs(project_id),
-                "can_generate_images": store.can_start_platform_image_generation(project_id, "toutiao"),
-                "image_generation_missing_inputs": store.platform_image_generation_missing_inputs(project_id, "toutiao"),
-                "outputs": {
-                    "post_json": record.outputs.get("toutiao_post_json"),
-                    "post_md": record.outputs.get("toutiao_post_md"),
-                    "image_prompts": record.outputs.get("toutiao_image_prompts"),
-                    "image_cards": record.outputs.get("toutiao_image_cards"),
-                },
-            },
-        },
+        "routes": routes,
         "can_rerun_visuals": store.can_start_visual_rerun(project_id),
         "visual_rerun_missing_inputs": store.visual_rerun_missing_inputs(project_id),
     }
@@ -1276,6 +1597,14 @@ def get_project_file(project_id: str, kind: str):
         return Response(file_path.read_text(encoding="utf-8"), media_type="application/json")
     if file_path.suffix == ".md":
         return Response(file_path.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
+    if file_path.suffix == ".docx":
+        platform_match = DOCX_KIND_RE.fullmatch(kind)
+        platform = platform_match.group(1) if platform_match else "platform"
+        return FileResponse(
+            file_path,
+            filename=f"{platform}-{project_id}-article.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
     return FileResponse(file_path, filename=file_path.name)
 
 

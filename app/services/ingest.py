@@ -178,19 +178,30 @@ def _find_downloaded_subtitle(source_dir: Path, video_id: Optional[str]) -> Opti
     return target
 
 
-def _is_unsupported_restricted_error(message: str) -> bool:
-    restricted_terms = [
-        "DRM",
-        "copyright",
-        "private video",
-        "sign in",
-        "login",
-        "paid",
-        "unavailable in your country",
-        "members-only",
-    ]
+def _classified_restriction(message: str) -> Optional[tuple[str, str]]:
     lowered = message.lower()
-    return any(term.lower() in lowered for term in restricted_terms)
+    classifications = [
+        ("drm_protected", ("drm",), "The media is DRM protected and cannot be processed by this project."),
+        (
+            "region_restricted",
+            ("unavailable in your country", "not available in your country", "geo-restricted", "geographic restriction"),
+            "The platform reports that this media is unavailable in the current region.",
+        ),
+        (
+            "login_required",
+            ("sign in", "login required", "private video", "members-only", "members only", "paid content"),
+            "The platform requires login, membership, payment, or owner permission for this media.",
+        ),
+        (
+            "copyright_restricted",
+            ("copyright", "copyrighted content"),
+            "The platform reports a copyright availability restriction for this media.",
+        ),
+    ]
+    for code, markers, description in classifications:
+        if any(marker in lowered for marker in markers):
+            return code, description
+    return None
 
 
 def _is_youtube_bot_check_error(message: str) -> bool:
@@ -206,6 +217,29 @@ def _is_media_download_forbidden(message: str) -> bool:
 def _is_requested_format_unavailable(message: str) -> bool:
     lowered = message.lower()
     return "requested format is not available" in lowered or "use --list-formats for a list of available formats" in lowered
+
+
+def _is_network_timeout(message: str) -> bool:
+    lowered = message.lower()
+    return any(term in lowered for term in ("timed out", "timeout", "read operation timed out", "connection timeout"))
+
+
+def _is_ytdlp_update_required(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        term in lowered
+        for term in (
+            "please update to the latest version",
+            "update yt-dlp",
+            "your version of yt-dlp is out of date",
+            "unsupported client version",
+        )
+    )
+
+
+def _is_cookie_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(term in lowered for term in ("cookies are no longer valid", "invalid cookies", "cookie file", "cookiesfrombrowser"))
 
 
 def _should_try_public_android_fallback(message: str) -> bool:
@@ -485,6 +519,33 @@ def _raise_ingest_ytdlp_error(message: str, exc: Exception, url: str, language: 
             ),
             message,
         ) from exc
+    if _is_requested_format_unavailable(message):
+        raise _yt_dlp_error(
+            "yt_dlp_format_unavailable",
+            (
+                "yt-dlp could read the media page, but the requested media format is not available. "
+                "Update yt-dlp and inspect the video's real formats with yt-dlp --list-formats; this does not mean the public URL is private."
+            ),
+            message,
+        ) from exc
+    if _is_cookie_error(message):
+        raise _yt_dlp_error(
+            "yt_dlp_cookies_invalid",
+            "The configured browser cookies or cookies.txt file could not be used. Export fresh cookies from an authorized browser session and retry.",
+            message,
+        ) from exc
+    if _is_network_timeout(message):
+        raise _yt_dlp_error(
+            "yt_dlp_network_timeout",
+            "The yt-dlp request timed out before the platform responded. Retry later or check the target Mac's network path.",
+            message,
+        ) from exc
+    if _is_ytdlp_update_required(message):
+        raise _yt_dlp_error(
+            "yt_dlp_update_required",
+            "The installed yt-dlp version is rejected or too old for the current platform response. Run the fixed project updater and retry.",
+            message,
+        ) from exc
     if _is_youtube_network_tls_error(message):
         raise _yt_dlp_error(
             "youtube_network_tls_failed",
@@ -495,10 +556,13 @@ def _raise_ingest_ytdlp_error(message: str, exc: Exception, url: str, language: 
             ),
             message,
         ) from exc
-    code = "restricted_or_unavailable_video" if _is_unsupported_restricted_error(message) else "yt_dlp_failed"
+    restriction = _classified_restriction(message)
+    if restriction:
+        code, description = restriction
+        raise _yt_dlp_error(code, description, message) from exc
     raise _yt_dlp_error(
-        code=code,
-        message="yt-dlp failed to fetch the video. Check that the URL is public and not login, paid, DRM, or region restricted.",
+        code="yt_dlp_failed",
+        message="yt-dlp failed for an unclassified reason. Review details.error; the project does not infer that a public URL is private.",
         raw_error=message,
     ) from exc
 

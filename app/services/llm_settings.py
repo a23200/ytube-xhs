@@ -15,6 +15,7 @@ LLM_ENV_KEYS = {
     "XHS_LLM_MAX_TOKENS",
     "XHS_LLM_TIMEOUT_MS",
     "XHS_LLM_MAX_CHARS",
+    "XHS_LLM_RETRY_ATTEMPTS",
 }
 
 
@@ -84,6 +85,7 @@ def get_llm_settings() -> Dict[str, object]:
         "max_tokens": settings.llm_max_tokens,
         "timeout_ms": settings.llm_timeout_ms,
         "max_chars": settings.llm_max_chars,
+        "retry_attempts": settings.llm_retry_attempts,
         "env_path": str(ENV_PATH),
     }
 
@@ -105,6 +107,8 @@ def update_llm_settings(request: LLMSettingsUpdate) -> Dict[str, object]:
         updates["XHS_LLM_TIMEOUT_MS"] = str(request.timeout_ms)
     if request.max_chars is not None:
         updates["XHS_LLM_MAX_CHARS"] = str(request.max_chars)
+    if request.retry_attempts is not None:
+        updates["XHS_LLM_RETRY_ATTEMPTS"] = str(request.retry_attempts)
     if request.api_key:
         updates["XHS_LLM_API_KEY"] = request.api_key
 
@@ -125,5 +129,6 @@ def update_llm_settings(request: LLMSettingsUpdate) -> Dict[str, object]:
     settings.llm_timeout_ms = _int_env("XHS_LLM_TIMEOUT_MS", settings.llm_timeout_ms)
     settings.llm_max_chars = _int_env("XHS_LLM_MAX_CHARS", settings.llm_max_chars)
     settings.llm_max_tokens = _int_env("XHS_LLM_MAX_TOKENS", settings.llm_max_tokens)
+    settings.llm_retry_attempts = min(10, max(1, _int_env("XHS_LLM_RETRY_ATTEMPTS", settings.llm_retry_attempts)))
     llm_client.reload_from_settings()
     return get_llm_settings()

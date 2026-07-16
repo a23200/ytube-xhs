@@ -7,26 +7,39 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from app.schemas.models import FILE_KIND_TO_PATH, ProgressLog, ProjectCreate, ProjectRecord, ProjectStatus
+from app.schemas.models import (
+    FILE_KIND_TO_PATH,
+    SUPPORTED_TARGET_PLATFORMS,
+    ProgressLog,
+    ProjectCreate,
+    ProjectRecord,
+    ProjectStatus,
+)
 from app.services.config import settings
 
 PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CANCEL_REQUEST_FILENAME = ".cancel-requested.json"
-RERUN_READY_STATUSES = {ProjectStatus.failed, ProjectStatus.completed}
+RERUN_READY_STATUSES = {ProjectStatus.failed, ProjectStatus.stopped, ProjectStatus.completed}
 PRODUCE_READY_STATUSES = {
     ProjectStatus.analysis_completed,
     ProjectStatus.xhs_completed,
     ProjectStatus.toutiao_completed,
+    ProjectStatus.douyin_completed,
+    ProjectStatus.bilibili_completed,
+    ProjectStatus.stopped,
     ProjectStatus.failed,
     ProjectStatus.completed,
 }
 IMAGE_GENERATION_READY_STATUSES = {
     ProjectStatus.xhs_completed,
     ProjectStatus.toutiao_completed,
+    ProjectStatus.douyin_completed,
+    ProjectStatus.bilibili_completed,
     ProjectStatus.failed,
     ProjectStatus.completed,
 }
 RUNNING_STATUSES = {
+    ProjectStatus.queued,
     ProjectStatus.created,
     ProjectStatus.ingesting,
     ProjectStatus.transcribing,
@@ -35,6 +48,7 @@ RUNNING_STATUSES = {
     ProjectStatus.planning_content,
     ProjectStatus.writing_xhs,
     ProjectStatus.producing_article,
+    ProjectStatus.validating_content,
     ProjectStatus.rendering_cards,
 }
 DOWNSTREAM_RERUN_REQUIRED_KINDS = ("metadata", "transcript", "keyframes", "visual_analysis")
@@ -59,6 +73,19 @@ TOUTIAO_IMAGE_GENERATION_REQUIRED_KINDS = (
     "toutiao_image_prompts",
 )
 
+LEGACY_STATUS_PLATFORMS = {
+    "xhs_completed": "xhs",
+    "toutiao_completed": "toutiao",
+    "douyin_completed": "douyin",
+    "bilibili_completed": "bilibili",
+}
+LEGACY_PLATFORM_OUTPUT_KINDS = {
+    "xhs": "xhs_post_json",
+    "toutiao": "toutiao_post_json",
+    "douyin": "douyin_post_json",
+    "bilibili": "bilibili_post_json",
+}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -78,6 +105,49 @@ def write_json(path: Path, data: Dict[str, Any]) -> None:
 
 def read_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _platform_from_details(value: Any) -> Optional[str]:
+    if not isinstance(value, dict):
+        return None
+    platform = value.get("platform")
+    if platform in SUPPORTED_TARGET_PLATFORMS:
+        return str(platform)
+    return _platform_from_details(value.get("details"))
+
+
+def _legacy_target_platform(payload: Dict[str, Any]) -> str:
+    configured = payload.get("target_platform")
+    if configured in SUPPORTED_TARGET_PLATFORMS:
+        return str(configured)
+    status = getattr(payload.get("status"), "value", payload.get("status"))
+    if status in LEGACY_STATUS_PLATFORMS:
+        return LEGACY_STATUS_PLATFORMS[str(status)]
+    error_platform = _platform_from_details(payload.get("error"))
+    if error_platform:
+        return error_platform
+    for log in reversed(payload.get("logs") or []):
+        if not isinstance(log, dict):
+            continue
+        platform = _platform_from_details(log.get("details"))
+        if platform:
+            return platform
+    outputs = payload.get("outputs") if isinstance(payload.get("outputs"), dict) else {}
+    generated = [platform for platform, kind in LEGACY_PLATFORM_OUTPUT_KINDS.items() if outputs.get(kind)]
+    return generated[0] if len(generated) == 1 else "xhs"
+
+
+def _record_from_payload(payload: Dict[str, Any]) -> ProjectRecord:
+    normalized = dict(payload)
+    normalized["target_platform"] = _legacy_target_platform(normalized)
+    return ProjectRecord(**normalized)
+
+
+def _normalize_target_platform(platform: str) -> str:
+    normalized = str(platform or "").strip().lower()
+    if normalized not in SUPPORTED_TARGET_PLATFORMS:
+        raise ValueError(f"Unsupported platform: {platform}")
+    return normalized
 
 
 class ProjectPaths:
@@ -143,6 +213,7 @@ class ProjectStore:
         record = ProjectRecord(
             project_id=project_id,
             url=str(request.url),
+            target_platform=request.target_platform,
             language=request.language,
             style=request.style,
             use_whisper=request.use_whisper,
@@ -156,14 +227,19 @@ class ProjectStore:
             outputs={},
         )
         self._write_record(paths, record)
-        self.log(project_id, ProjectStatus.created, "Project created.")
+        self.log(
+            project_id,
+            ProjectStatus.created,
+            "Project created.",
+            details={"platform": request.target_platform},
+        )
         return self.get(project_id)
 
     def list(self) -> List[ProjectRecord]:
         records = []
         for path in sorted(self.projects_dir.glob("*/project.json"), reverse=True):
             try:
-                records.append(ProjectRecord(**read_json(path)))
+                records.append(_record_from_payload(read_json(path)))
             except Exception:
                 continue
         return records
@@ -172,14 +248,14 @@ class ProjectStore:
         path = self.paths(project_id).status_file()
         if not path.exists():
             raise FileNotFoundError(project_id)
-        return ProjectRecord(**read_json(path))
+        return _record_from_payload(read_json(path))
 
     def delete(self, project_id: str) -> ProjectRecord:
         with self._lock:
             paths = self.paths(project_id)
             if not paths.status_file().exists():
                 raise FileNotFoundError(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if record.status in RUNNING_STATUSES:
                 raise RuntimeError("Cannot delete a project while it is running.")
             shutil.rmtree(paths.project_dir)
@@ -193,6 +269,17 @@ class ProjectStore:
         details: Optional[Dict[str, Any]] = None,
     ) -> ProjectRecord:
         return self.log(project_id, status, message, details=details, set_status=True)
+
+    def set_target_platform(self, project_id: str, platform: str) -> ProjectRecord:
+        normalized = _normalize_target_platform(platform)
+        with self._lock:
+            paths = self.paths(project_id)
+            record = _record_from_payload(read_json(paths.status_file()))
+            record.target_platform = normalized
+            record.updated_at = utc_now()
+            self._write_record(paths, record)
+            self._write_run_metadata(paths, record)
+            return record
 
     def downstream_rerun_missing_inputs(self, project_id: str) -> List[str]:
         paths = self.paths(project_id)
@@ -255,7 +342,7 @@ class ProjectStore:
     def cancel(self, project_id: str) -> ProjectRecord:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in RUNNING_STATUSES:
                 return record
             previous_status = record.status.value
@@ -267,20 +354,27 @@ class ProjectStore:
                 "details": {
                     "previous_status": previous_status,
                     "stopped_at": now,
+                    "platform": record.target_platform,
                 },
             }
+            from app.services.report_writer import write_partial_asset_package
+
             write_json(paths.cancel_file(), error)
-            record.status = ProjectStatus.failed
+            write_partial_asset_package(paths, error, record.warnings)
+            record.status = ProjectStatus.stopped
             record.error = error
             record.updated_at = now
             record.logs.append(
                 ProgressLog(
                     time=now,
-                    status=ProjectStatus.failed,
+                    status=ProjectStatus.stopped,
                     message=error["message"],
                     details=error,
                 )
             )
+            for kind, relative in FILE_KIND_TO_PATH.items():
+                if (paths.project_dir / relative).exists():
+                    record.outputs[kind] = relative
             self._write_record(paths, record)
             self._write_run_metadata(paths, record)
             return record
@@ -288,7 +382,7 @@ class ProjectStore:
     def try_start_downstream_rerun(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in RERUN_READY_STATUSES:
                 return False, record, []
             missing_inputs = self._missing_downstream_inputs(paths, record)
@@ -303,7 +397,7 @@ class ProjectStore:
                     time=record.updated_at,
                     status=ProjectStatus.planning_content,
                     message="Downstream rerun queued.",
-                    details={"scope": "downstream"},
+                    details={"scope": "downstream", "platform": record.target_platform},
                 )
             )
             self._write_record(paths, record)
@@ -311,47 +405,27 @@ class ProjectStore:
             return True, record, []
 
     def try_start_produce(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
-        with self._lock:
-            paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
-            if record.status not in PRODUCE_READY_STATUSES:
-                return False, record, []
-            missing_inputs = self._missing_produce_inputs(paths, record)
-            if missing_inputs:
-                return False, record, missing_inputs
-            self._clear_cancel_requested(paths)
-            record.status = ProjectStatus.producing_article
-            record.error = None
-            record.updated_at = utc_now()
-            record.logs.append(
-                ProgressLog(
-                    time=record.updated_at,
-                    status=ProjectStatus.producing_article,
-                    message="Produce job queued.",
-                    details={"scope": "produce", "platform": "xhs"},
-                )
-            )
-            self._write_record(paths, record)
-            self._write_run_metadata(paths, record)
-            return True, record, []
+        return self.try_start_platform_produce(project_id, platform="xhs")
 
     def try_start_platform_produce(self, project_id: str, platform: str = "xhs") -> Tuple[bool, ProjectRecord, List[str]]:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in PRODUCE_READY_STATUSES:
                 return False, record, []
             missing_inputs = self._missing_produce_inputs(paths, record)
             if missing_inputs:
                 return False, record, missing_inputs
+            platform = _normalize_target_platform(platform)
             self._clear_cancel_requested(paths)
-            record.status = ProjectStatus.producing_article
+            record.target_platform = platform
+            record.status = ProjectStatus.queued
             record.error = None
             record.updated_at = utc_now()
             record.logs.append(
                 ProgressLog(
                     time=record.updated_at,
-                    status=ProjectStatus.producing_article,
+                    status=ProjectStatus.queued,
                     message="Produce job queued.",
                     details={"scope": "produce", "platform": platform},
                 )
@@ -363,7 +437,7 @@ class ProjectStore:
     def try_start_image_generation(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if record.text_only:
                 return False, record, []
             if record.status not in IMAGE_GENERATION_READY_STATUSES:
@@ -372,6 +446,7 @@ class ProjectStore:
             if missing_inputs:
                 return False, record, missing_inputs
             self._clear_cancel_requested(paths)
+            record.target_platform = "xhs"
             record.status = ProjectStatus.rendering_cards
             record.error = None
             record.updated_at = utc_now()
@@ -390,7 +465,7 @@ class ProjectStore:
     def try_start_platform_image_generation(self, project_id: str, platform: str = "xhs") -> Tuple[bool, ProjectRecord, List[str]]:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if record.text_only:
                 return False, record, []
             if record.status not in IMAGE_GENERATION_READY_STATUSES:
@@ -398,7 +473,9 @@ class ProjectStore:
             missing_inputs = self._missing_platform_image_generation_inputs(paths, record, platform)
             if missing_inputs:
                 return False, record, missing_inputs
+            platform = _normalize_target_platform(platform)
             self._clear_cancel_requested(paths)
+            record.target_platform = platform
             record.status = ProjectStatus.rendering_cards
             record.error = None
             record.updated_at = utc_now()
@@ -417,7 +494,7 @@ class ProjectStore:
     def try_start_visual_rerun(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in RERUN_READY_STATUSES:
                 return False, record, []
             missing_inputs = self._missing_visual_inputs(paths, record)
@@ -432,7 +509,7 @@ class ProjectStore:
                     time=record.updated_at,
                     status=ProjectStatus.analyzing_visuals,
                     message="Visual analysis rerun queued.",
-                    details={"scope": "visuals_and_downstream"},
+                    details={"scope": "visuals_and_downstream", "platform": record.target_platform},
                 )
             )
             self._write_record(paths, record)
@@ -449,12 +526,12 @@ class ProjectStore:
     ) -> ProjectRecord:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
-            if paths.cancel_file().exists() and status != ProjectStatus.failed:
+            record = _record_from_payload(read_json(paths.status_file()))
+            if paths.cancel_file().exists() and status not in {ProjectStatus.failed, ProjectStatus.stopped}:
                 return record
             if set_status:
                 record.status = status
-                if status != ProjectStatus.failed:
+                if status not in {ProjectStatus.failed, ProjectStatus.stopped}:
                     record.error = None
             record.updated_at = utc_now()
             record.logs.append(
@@ -472,7 +549,7 @@ class ProjectStore:
     def add_warning(self, project_id: str, warning: str) -> None:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
             if warning not in record.warnings:
@@ -484,7 +561,7 @@ class ProjectStore:
     def clear_outputs(self, project_id: str, kinds: Iterable[str]) -> None:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
             for kind in kinds:
@@ -496,7 +573,7 @@ class ProjectStore:
     def clear_warnings(self, project_id: str) -> None:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
             record.warnings = []
@@ -511,7 +588,7 @@ class ProjectStore:
             for status_file in sorted(self.projects_dir.glob("*/project.json")):
                 try:
                     paths = ProjectPaths(status_file.parent)
-                    record = ProjectRecord(**read_json(status_file))
+                    record = _record_from_payload(read_json(status_file))
                     updated_at = parse_time(record.updated_at).timestamp()
                 except Exception:
                     continue
@@ -528,6 +605,7 @@ class ProjectStore:
                         "previous_status": record.status.value,
                         "updated_at": record.updated_at,
                         "older_than_seconds": older_than_seconds,
+                        "platform": record.target_platform,
                     },
                 }
                 recovered.append(
@@ -556,6 +634,22 @@ class ProjectStore:
                 self._write_run_metadata(paths, record)
         return recovered
 
+    def recover_interrupted_projects(self) -> List[Dict[str, Any]]:
+        """Recover every running record left by a previous service process."""
+        from app.services.report_writer import write_partial_asset_package
+
+        recovered = self.mark_stale_running_failed(older_than_seconds=0, dry_run=False)
+        for item in recovered:
+            project_id = item["project_id"]
+            paths = self.paths(project_id)
+            record = self.get(project_id)
+            write_partial_asset_package(paths, item["error"], record.warnings)
+            for kind in FILE_KIND_TO_PATH:
+                path = paths.file_for_kind(kind)
+                if path.exists():
+                    self.add_output(project_id, kind, path)
+        return recovered
+
     def add_output(self, project_id: str, kind: str, path: Path) -> None:
         if kind not in FILE_KIND_TO_PATH:
             raise KeyError(kind)
@@ -567,7 +661,7 @@ class ProjectStore:
         if not output_path.exists():
             raise FileNotFoundError(path)
         with self._lock:
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
             record.outputs[kind] = FILE_KIND_TO_PATH[kind]
@@ -578,7 +672,11 @@ class ProjectStore:
     def fail(self, project_id: str, error: Dict[str, Any]) -> ProjectRecord:
         with self._lock:
             paths = self.paths(project_id)
-            record = ProjectRecord(**read_json(paths.status_file()))
+            record = _record_from_payload(read_json(paths.status_file()))
+            error = dict(error)
+            details = dict(error.get("details") or {})
+            details.setdefault("platform", record.target_platform)
+            error["details"] = details
             if paths.cancel_file().exists() and record.error and record.error.get("code") == "user_stopped":
                 return record
             record.status = ProjectStatus.failed

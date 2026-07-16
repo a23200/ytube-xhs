@@ -139,6 +139,7 @@ def collect_diagnostics() -> Dict[str, Any]:
         "timeout_ms": settings.llm_timeout_ms,
         "max_chars": settings.llm_max_chars,
         "max_tokens": settings.llm_max_tokens,
+        "retry_attempts": settings.llm_retry_attempts,
         "api_key_env": "configured" if settings.llm_api_key else "missing",
         "readiness_check": "configuration_only",
         "self_test_endpoint": "/api/llm/self-test",

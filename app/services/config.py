@@ -66,6 +66,7 @@ class Settings:
     llm_timeout_ms: int
     llm_max_chars: int
     llm_max_tokens: int
+    llm_retry_attempts: int
     image_api_key: Optional[str]
     image_base_url: str
     image_model: str
@@ -81,16 +82,19 @@ class Settings:
     ytdlp_cookies_from_browser: Optional[str]
     ytdlp_impersonate: Optional[str]
     ytdlp_socket_timeout_seconds: int
+    max_analyze_workers: int
+    max_produce_workers: int
 
     def __init__(self) -> None:
         self.runtime_dir = _path_env("XHS_RUNTIME_DIR", DEFAULT_RUNTIME_DIR)
         self.llm_api_key = os.getenv("BUSINESS_LLM_API_KEY") or os.getenv("XHS_LLM_API_KEY")
         self.llm_base_url = os.getenv("XHS_LLM_BASE_URL", "https://api.deepseek.com").rstrip("/")
-        self.llm_model = os.getenv("XHS_LLM_MODEL", "deepseek-v4-flash")
+        self.llm_model = os.getenv("XHS_LLM_MODEL", "deepseek-chat")
         self.llm_requires_api_key = _llm_requires_api_key(self.llm_base_url)
         self.llm_timeout_ms = _int_env("XHS_LLM_TIMEOUT_MS", 90000)
         self.llm_max_chars = _int_env("XHS_LLM_MAX_CHARS", 80000)
         self.llm_max_tokens = _int_env("XHS_LLM_MAX_TOKENS", 3000)
+        self.llm_retry_attempts = min(10, max(1, _int_env("XHS_LLM_RETRY_ATTEMPTS", 3)))
         self.image_api_key = os.getenv("XHS_IMAGE_API_KEY")
         self.image_base_url = os.getenv("XHS_IMAGE_BASE_URL", "").rstrip("/")
         self.image_model = os.getenv("XHS_IMAGE_MODEL", "")
@@ -107,6 +111,8 @@ class Settings:
         self.ytdlp_cookies_from_browser = os.getenv("XHS_YTDLP_COOKIES_FROM_BROWSER") or None
         self.ytdlp_impersonate = os.getenv("XHS_YTDLP_IMPERSONATE") or None
         self.ytdlp_socket_timeout_seconds = _int_env("XHS_YTDLP_SOCKET_TIMEOUT_SECONDS", 30)
+        self.max_analyze_workers = max(1, _int_env("YTXHS_MAX_ANALYZE_WORKERS", 1))
+        self.max_produce_workers = max(1, _int_env("YTXHS_MAX_PRODUCE_WORKERS", 3))
 
 
 settings = Settings()

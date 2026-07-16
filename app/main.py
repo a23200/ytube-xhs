@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -6,11 +7,21 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
 from app.services.config import BASE_DIR
+from app.services.runtime_store import store
+from app.services.task_manager import task_manager
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    store.recover_interrupted_projects()
+    yield
+    task_manager.cancel_all()
 
 app = FastAPI(
-    title="Video Link to Xiaohongshu Asset Package",
-    version="0.1.0",
-    description="A real processing pipeline from video URL to Xiaohongshu image-text draft assets.",
+    title="Video Link to Multi-platform Content Package",
+    version="0.2.0",
+    description="A real processing pipeline from authorized video URLs to platform-specific articles and export files.",
+    lifespan=lifespan,
 )
 
 app.include_router(router)

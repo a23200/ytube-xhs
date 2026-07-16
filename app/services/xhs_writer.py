@@ -1,9 +1,11 @@
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from app.services.article_quality import evaluate_article_quality, quality_error
 from app.services.contracts import validate_xhs_post
 from app.services.errors import PipelineError
 from app.services.llm_client import llm_client
+from app.services.platforms import get_platform, platform_values
 from app.services.runtime_store import ProjectPaths, write_json
 from app.services.source_anchors import validate_xhs_post_anchors
 from app.services.text_utils import clean_text
@@ -22,49 +24,46 @@ XHS_POST_FIELDS = [
     "publish_suggestion",
     "source_disclaimer",
 ]
-PLATFORM_PROMPTS = {
-    "xhs": {
-        "name": "小红书",
-        "artifact": "xiaohongshu-post.json",
-        "output_filename": "xiaohongshu-post.json",
+HOOK_INSTRUCTION = (
+    "请先写一个不超过100个中文字符的开头钩子。语气短促、有冲击力、口语化，突出事实中的反差、冲突或悬念。"
+    "专业概念必须换成生活中的大白话，让小学生和老年人都能理解。不得捏造冲突、数据或结论。"
+)
+COMMON_ARTICLE_RULES = (
+    "正文只能使用连贯自然段，全程不得出现任何小标题，包括序号标题、背景、原因、总结、写在最后、Markdown 标题、"
+    "加粗标题或独占一行的概括性短句。不要出现“本视频/这条视频/第几秒/拆解/整理”等报告感表达。"
+    "不能逐字照搬字幕或来源文章，不得新增来源中不存在的人物、数字、因果和结论。"
+    "可以把来源中真实存在的百分比转成“每 X 个特定群体中，大约就有 1 个”，但必须保留口径、范围和时间；"
+    "只有来源同时给出总体人数或精确人数时，才可换算为“约 XX 万人、家庭或用户”，否则禁止猜测总体。"
+)
+
+
+def _platform_prompt(platform: str) -> Dict[str, str]:
+    adapter = get_platform(platform)
+    image_guidance = (
+        "image_plan 要服务最终原创文章，可使用关键帧作为事实和视觉参考，但不能做成视频截图复盘。"
+        if adapter.supports_images
+        else "image_plan 仅作为内部内容节奏记录，不会触发图片生成。"
+    )
+    return {
+        "name": adapter.name,
+        "artifact": adapter.post_filename,
+        "output_filename": adapter.post_filename,
         "system": (
-            "你是小红书原创图文编辑。你要基于原视频提供的信息、情绪和方向进行二次创作，"
-            "产出一篇能独立发布的原创文章图文，而不是视频拆解、字幕摘要或逐帧复述。不能逐字照搬字幕，"
-            "不能生成侵权搬运文案，必须保留来源信息和时间点用于内部追溯。中文自然、有信息密度、适合收藏转发。"
-            "返回严格 JSON。"
+            f"你是{adapter.name}原创内容编辑。你要基于来源提供的事实、情绪和方向进行二次创作，产出{adapter.content_type}，"
+            "而不是字幕摘要、逐帧复述或侵权搬运文案。必须保留来源信息和时间点用于内部追溯。"
+            f"{adapter.style_guidance}{COMMON_ARTICLE_RULES}返回严格 JSON。"
         ),
         "user": (
-            "基于 content_assets 生成 xiaohongshu-post.json。请先消化原视频里的信息与方向，再转换成我们的原创观点、"
-            "读者场景、行动建议和图文叙事。正文短段落，避免空泛鸡汤，也不要出现“本视频/这条视频/第几秒/拆解/整理”等报告感表达。"
-            "图片计划要服务最终原创文章，可使用关键帧作为事实和视觉参考，但不要把卡片做成视频截图复盘。"
-            "如果 keyframes 非空，image_plan 每一页必须优先填写 keyframes 中真实存在的 source_frame_path；"
-            "source_frame_time 只能使用 keyframes 中已有的 time，不能编造时间点。"
-            "如果 keyframes 为空，source_frame_time 和 source_frame_path 必须为 null，并用 content_point 说明文字视觉方向。"
+            f"基于 content_assets 生成 {adapter.post_filename}。{HOOK_INSTRUCTION}"
+            f"{adapter.length_guidance}{COMMON_ARTICLE_RULES}{image_guidance}"
+            "如果 keyframes 非空，image_plan 每一项的 source_frame_path/source_frame_time 只能使用 keyframes 中真实存在的值。"
+            "如果 keyframes 为空，source_frame_time 和 source_frame_path 必须为 null。"
             "返回字段必须匹配 schema，不能省略任何字段。\n\n"
         ),
-    },
-    "toutiao": {
-        "name": "今日头条",
-        "artifact": "toutiao-post.json",
-        "output_filename": "toutiao-post.json",
-        "system": (
-            "你是今日头条原创图文编辑。你要基于原视频提供的信息、情绪和方向进行二次创作，"
-            "产出一篇能独立发布的资讯型原创文章，而不是视频拆解、字幕摘要或逐帧复述。不能逐字照搬字幕，"
-            "不能生成侵权搬运文案，必须保留来源信息和时间点用于内部追溯。文风应更像资讯图文：标题清楚、"
-            "导语交代看点、正文有小标题和事实依据，少用营销感语气、表情符号和小红书式种草表达。返回严格 JSON。"
-        ),
-        "user": (
-            "基于 content_assets 生成 toutiao-post.json。请先消化原视频的信息与方向，再转换成我们的原创论述、背景解释、"
-            "读者关切和结论。标题要符合今日头条信息流阅读习惯，突出事实、冲突、趋势、方法或结论，但不能标题党。"
-            "body 要使用导语 + 分段小标题 + 要点解释的结构，便于图文发布；不要出现“本视频/这条视频/第几秒/拆解/整理”等报告感表达。"
-            "图片计划要服务最终原创文章，可使用关键帧作为事实和视觉参考，但不要把卡片做成视频截图复盘。"
-            "如果 keyframes 非空，image_plan 每一页必须优先填写 keyframes 中真实存在的 source_frame_path；"
-            "source_frame_time 只能使用 keyframes 中已有的 time，不能编造时间点。"
-            "如果 keyframes 为空，source_frame_time 和 source_frame_path 必须为 null，并用 content_point 说明文字视觉方向。"
-            "返回字段必须匹配 schema，不能省略任何字段。\n\n"
-        ),
-    },
-}
+    }
+
+
+PLATFORM_PROMPTS = {adapter.key: _platform_prompt(adapter.key) for adapter in platform_values()}
 
 
 def _post_schema() -> Dict[str, Any]:
@@ -394,7 +393,7 @@ def _guard_against_verbatim_copy(payload: Dict[str, Any], content_assets: Dict[s
             if match:
                 raise PipelineError(
                     code="verbatim_source_copy_detected",
-                    message="Generated Xiaohongshu copy contains a long verbatim source fragment. Ask the LLM to rewrite instead of copying subtitles.",
+                    message="Generated platform copy contains a long verbatim source fragment. The LLM must rewrite instead of copying subtitles.",
                     step="writing_xhs",
                     details={"matched_fragment": match, "field": field, "min_chars": MIN_VERBATIM_CHARS},
                 )
@@ -437,7 +436,7 @@ def _validate_post_payload(
     return payload
 
 
-def _rewrite_post_for_verbatim(
+def _rewrite_post_for_quality(
     payload: Dict[str, Any],
     metadata: Dict[str, Any],
     content_assets: Dict[str, Any],
@@ -445,28 +444,28 @@ def _rewrite_post_for_verbatim(
     visual_payload: Dict[str, Any],
     style: str,
     platform: str,
-    violation: PipelineError,
+    quality_report: Dict[str, Any],
 ) -> Dict[str, Any]:
-    prompt = PLATFORM_PROMPTS.get(platform, PLATFORM_PROMPTS["xhs"])
+    prompt = PLATFORM_PROMPTS[platform]
     return llm_client.json_chat(
         [
             {
                 "role": "system",
                 "content": (
-                    f"你是{prompt['name']}原创稿版权安全审校。你会收到一个平台稿 JSON 草稿，其中部分可见字段"
-                    "逐字照搬了来源字幕或证据。请返回修复后的完整 JSON：保留事实、结构、标题数量、image_plan 页数、"
-                    "source_frame_time/source_frame_path 等锚点，但把标题、封面文案、开头、正文、图片 caption/content_point、"
-                    "发布建议等全部改成原创表达。不能连续照搬来源原文 24 个字符以上。不要新增无来源事实，返回严格 JSON。"
+                    f"你是{prompt['name']}文章质量审校。请根据机器校验报告定向重写完整平台稿 JSON。"
+                    "保留来源事实、数字口径、人物、因果、标题数量、image_plan 页数以及所有真实来源锚点。"
+                    "正文只能由连贯自然段构成，不得使用任何小标题。开头必须在100个中文字符以内，有真实反差、冲突或悬念，"
+                    "专业词换成大白话。不得连续照搬来源原文24个字符以上，不得编造人口总量或数据，返回严格 JSON。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "修复这个平台稿。重点修复 violation.field 指向的字段，并检查所有可见字段，确保不是字幕摘要或原文搬运。"
-                    "证据原文只允许存在于内部 content_assets.source_evidence/source_text，不要出现在可发布字段。"
+                    "逐条修复 quality_report.violations，并重新检查所有可发布字段。不要简单删除小标题导致上下文断裂，"
+                    "要把标题含义自然融入前后段落。证据原文只允许存在于内部 evidence 字段，不得出现在可发布字段。"
                     "\n\n"
                     f"Schema:\n{json.dumps(_post_schema(), ensure_ascii=False)}\n\n"
-                    f"Violation:\n{json.dumps(violation.to_dict(), ensure_ascii=False)}\n\n"
+                    f"Quality report:\n{json.dumps(quality_report, ensure_ascii=False)}\n\n"
                     f"Context:\n{json.dumps(_post_context(metadata, content_assets, keyframes_payload, visual_payload, style), ensure_ascii=False)}\n\n"
                     f"Draft JSON:\n{json.dumps(payload, ensure_ascii=False)}"
                 ),
@@ -487,26 +486,48 @@ def _guard_or_rewrite_post(
     paths: ProjectPaths,
     *,
     platform: str,
-) -> Dict[str, Any]:
-    try:
-        _guard_against_verbatim_copy(payload, content_assets)
-        return payload
-    except PipelineError as exc:
-        if exc.code != "verbatim_source_copy_detected":
-            raise
-        repaired = _rewrite_post_for_verbatim(
-            payload,
+    transcript_payload: Optional[Dict[str, Any]] = None,
+    on_validation: Optional[Callable[[Dict[str, Any]], None]] = None,
+    max_rewrites: int = 2,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    current = payload
+    for rewrite_count in range(max_rewrites + 1):
+        field_violation: Optional[PipelineError] = None
+        try:
+            _guard_against_verbatim_copy(current, content_assets)
+        except PipelineError as exc:
+            field_violation = exc
+        report = evaluate_article_quality(
+            current,
+            content_assets,
+            transcript_payload,
+            platform=platform,
+            rewrite_count=rewrite_count,
+        )
+        write_json(paths.analysis_dir / get_platform(platform).quality_filename, report)
+        if field_violation:
+            precise = field_violation.to_dict()
+            report["violations"] = [item for item in report["violations"] if item.get("code") != precise["code"]]
+            report["violations"].insert(0, precise)
+            report["passed"] = False
+        if on_validation:
+            on_validation(report)
+        if report["passed"]:
+            return current, report
+        if rewrite_count >= max_rewrites:
+            raise quality_error(report)
+        current = _rewrite_post_for_quality(
+            current,
             metadata,
             content_assets,
             keyframes_payload,
             visual_payload,
             style,
             platform,
-            exc,
+            report,
         )
-        repaired = _validate_post_payload(repaired, keyframes_payload, paths, platform=platform)
-        _guard_against_verbatim_copy(repaired, content_assets)
-        return repaired
+        current = _validate_post_payload(current, keyframes_payload, paths, platform=platform)
+    raise RuntimeError("Unreachable quality validation state")
 
 
 def write_xhs_post(
@@ -516,8 +537,20 @@ def write_xhs_post(
     visual_payload: Dict[str, Any],
     style: str,
     paths: ProjectPaths,
+    transcript_payload: Optional[Dict[str, Any]] = None,
+    on_validation: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
-    return _write_platform_post(metadata, content_assets, keyframes_payload, visual_payload, style, paths, platform="xhs")
+    return write_platform_post(
+        metadata,
+        content_assets,
+        keyframes_payload,
+        visual_payload,
+        style,
+        paths,
+        platform="xhs",
+        transcript_payload=transcript_payload,
+        on_validation=on_validation,
+    )
 
 
 def write_toutiao_post(
@@ -527,11 +560,23 @@ def write_toutiao_post(
     visual_payload: Dict[str, Any],
     style: str,
     paths: ProjectPaths,
+    transcript_payload: Optional[Dict[str, Any]] = None,
+    on_validation: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
-    return _write_platform_post(metadata, content_assets, keyframes_payload, visual_payload, style, paths, platform="toutiao")
+    return write_platform_post(
+        metadata,
+        content_assets,
+        keyframes_payload,
+        visual_payload,
+        style,
+        paths,
+        platform="toutiao",
+        transcript_payload=transcript_payload,
+        on_validation=on_validation,
+    )
 
 
-def _write_platform_post(
+def write_platform_post(
     metadata: Dict[str, Any],
     content_assets: Dict[str, Any],
     keyframes_payload: Dict[str, Any],
@@ -540,8 +585,11 @@ def _write_platform_post(
     paths: ProjectPaths,
     *,
     platform: str,
+    transcript_payload: Optional[Dict[str, Any]] = None,
+    on_validation: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
-    prompt = PLATFORM_PROMPTS.get(platform, PLATFORM_PROMPTS["xhs"])
+    adapter = get_platform(platform)
+    prompt = PLATFORM_PROMPTS[adapter.key]
     schema = _post_schema()
     context = _post_context(metadata, content_assets, keyframes_payload, visual_payload, style)
     try:
@@ -566,7 +614,7 @@ def _write_platform_post(
     except PipelineError:
         raise
     payload = _validate_post_payload(payload, keyframes_payload, paths, platform=platform)
-    payload = _guard_or_rewrite_post(
+    payload, quality_report = _guard_or_rewrite_post(
         payload,
         metadata,
         content_assets,
@@ -575,8 +623,19 @@ def _write_platform_post(
         style,
         paths,
         platform=platform,
+        transcript_payload=transcript_payload,
+        on_validation=on_validation,
     )
     if "source_disclaimer" not in payload:
         payload["source_disclaimer"] = "本稿基于公开视频/授权视频的信息进行二次创作，保留来源与时间点用于追溯。"
-    write_json(paths.analysis_dir / str(prompt["output_filename"]), payload)
+    payload["platform"] = adapter.key
+    payload["platform_name"] = adapter.name
+    payload["quality"] = {
+        "estimated_rewrite_degree": quality_report["similarity"]["estimated_rewrite_degree"],
+        "rewrite_count": quality_report["rewrite_count"],
+        "report": adapter.quality_filename,
+        "note": quality_report["policy"]["originality_note"],
+    }
+    write_json(paths.analysis_dir / adapter.post_filename, payload)
+    write_json(paths.analysis_dir / adapter.quality_filename, quality_report)
     return payload

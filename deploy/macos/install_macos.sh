@@ -349,6 +349,8 @@ if [ "$SOURCE_DIR" != "$(cd "$APP_DIR" 2>/dev/null && pwd -P || echo "$APP_DIR")
     --exclude 'dist/' \
     --exclude '.pytest_cache/' \
     --exclude '.ruff_cache/' \
+    --exclude '.playwright-cli/' \
+    --exclude 'output/' \
     --exclude '__pycache__/' \
     --exclude '*.pyc' \
     --exclude '.DS_Store' \

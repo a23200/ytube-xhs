@@ -9,6 +9,34 @@ BUILD_DIR="$DIST_DIR/$PACKAGE_NAME"
 ARCHIVE="$DIST_DIR/${PACKAGE_NAME}.tar.gz"
 SHA_FILE="$DIST_DIR/${PACKAGE_NAME}.sha256"
 
+verify_archive() {
+  local list_file
+  list_file="$(mktemp "${TMPDIR:-/tmp}/ytube-xhs-package-list.XXXXXX")"
+  trap 'rm -f "$list_file"' RETURN
+  tar -tzf "$ARCHIVE" > "$list_file"
+
+  local forbidden='(^|/)(\.git|\.venv|runtime|dist|output|\.playwright-cli|\.pytest_cache|\.ruff_cache|__pycache__)(/|$)|(^|/)\.env$|(^|/)\.env\.(local|production|development|test)$|(^|/)(cookies?(\.txt)?|.*cookie.*\.(txt|json|sqlite)|.*secret.*|.*api[-_]?key.*)(/|$)|\.pyc$|\.DS_Store$'
+  if grep -Eiq "$forbidden" "$list_file"; then
+    echo "Deployment package contains forbidden local/secrets path(s):" >&2
+    grep -Ei "$forbidden" "$list_file" >&2 || true
+    exit 1
+  fi
+  for required in \
+    "${PACKAGE_NAME}/app/main.py" \
+    "${PACKAGE_NAME}/requirements.txt" \
+    "${PACKAGE_NAME}/install-from-github-macos.sh" \
+    "${PACKAGE_NAME}/update-macos.sh" \
+    "${PACKAGE_NAME}/start.sh" \
+    "${PACKAGE_NAME}/deploy/macos/install_macos.sh" \
+    "${PACKAGE_NAME}/PACKAGE-MANIFEST.txt"; do
+    if ! grep -Fqx "$required" "$list_file"; then
+      echo "Deployment package is missing required path: $required" >&2
+      exit 1
+    fi
+  done
+  echo "Archive content verification passed."
+}
+
 mkdir -p "$DIST_DIR"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
@@ -23,6 +51,8 @@ rsync -a \
   --exclude 'dist/' \
   --exclude '.pytest_cache/' \
   --exclude '.ruff_cache/' \
+  --exclude '.playwright-cli/' \
+  --exclude 'output/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
   --exclude '.DS_Store' \
@@ -49,7 +79,9 @@ EOF
 chmod +x "$BUILD_DIR/deploy/macos/"*.sh "$BUILD_DIR/scripts/"*.sh 2>/dev/null || true
 
 tar -C "$DIST_DIR" -czf "$ARCHIVE" "$PACKAGE_NAME"
+verify_archive
 shasum -a 256 "$ARCHIVE" > "$SHA_FILE"
+shasum -a 256 -c "$SHA_FILE"
 
 rm -rf "$BUILD_DIR"
 

@@ -162,6 +162,7 @@ def test_llm_settings_routes_do_not_expose_plaintext_key(monkeypatch):
             "max_tokens": 512,
             "timeout_ms": 30000,
             "max_chars": 120000,
+            "retry_attempts": 3,
             "env_path": "/tmp/.env",
         }
 
@@ -188,6 +189,7 @@ def test_llm_settings_routes_do_not_expose_plaintext_key(monkeypatch):
             "max_tokens": 1024,
             "timeout_ms": 45000,
             "max_chars": 100000,
+            "retry_attempts": 4,
         },
     )
 
@@ -198,6 +200,7 @@ def test_llm_settings_routes_do_not_expose_plaintext_key(monkeypatch):
     assert saved.json()["model"] == "model-b"
     assert "secret-test-key" not in str(saved.json())
     assert saved_payloads[0].api_key == "secret-test-key"
+    assert saved_payloads[0].retry_attempts == 4
 
 
 def test_image_settings_routes_do_not_expose_plaintext_key(monkeypatch):
@@ -448,7 +451,7 @@ def test_produce_endpoint_queues_when_analysis_artifacts_exist(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.json() == {"project_id": project_id, "status": "queued", "scope": "produce"}
     assert called == [project_id]
-    assert test_store.get(project_id).status == "producing_article"
+    assert test_store.get(project_id).status == "queued"
     assert duplicate.status_code == 409
 
 
@@ -484,7 +487,7 @@ def test_toutiao_produce_endpoint_queues_when_analysis_artifacts_exist(tmp_path,
     assert response.status_code == 200
     assert response.json() == {"project_id": project_id, "status": "queued", "scope": "produce", "platform": "toutiao"}
     assert called == [project_id]
-    assert test_store.get(project_id).status == "producing_article"
+    assert test_store.get(project_id).status == "queued"
     assert duplicate.status_code == 409
 
 
@@ -970,14 +973,14 @@ def test_project_status_progress_reports_produce_mode(tmp_path, monkeypatch):
     assert missing == []
     assert status.status_code == 200
     body = status.json()
-    assert body["status_label"] == "生成小红书稿"
+    assert body["status_label"] == "小红书任务排队中"
     assert body["progress"]["mode"] == "produce"
     assert body["progress"]["mode_label"] == "小红书稿进度"
-    assert body["progress"]["current_step"] == "producing_article"
-    assert body["progress"]["current_step_label"] == "生成小红书稿"
+    assert body["progress"]["current_step"] == "queued"
+    assert body["progress"]["current_step_label"] == "小红书任务排队中"
     assert body["progress"]["percent"] >= 1
     assert body["progress"]["remaining_seconds"] is not None
-    assert [step["label"] for step in body["progress"]["steps"]] == ["生成小红书稿", "小红书稿完成"]
+    assert [step["label"] for step in body["progress"]["steps"]] == ["小红书任务排队中", "生成小红书稿", "校验小红书稿", "小红书稿完成"]
 
 
 def test_project_status_progress_reports_toutiao_produce_mode_immediately(tmp_path, monkeypatch):
@@ -1010,14 +1013,79 @@ def test_project_status_progress_reports_toutiao_produce_mode_immediately(tmp_pa
     assert missing == []
     assert status.status_code == 200
     body = status.json()
-    assert body["status_label"] == "生成今日头条稿"
+    assert body["status_label"] == "今日头条任务排队中"
     assert body["progress"]["mode"] == "produce"
     assert body["progress"]["mode_label"] == "今日头条稿进度"
     assert body["progress"]["platform"] == "toutiao"
-    assert body["progress"]["current_step"] == "producing_article"
-    assert body["progress"]["current_step_label"] == "生成今日头条稿"
-    assert [step["label"] for step in body["progress"]["steps"]] == ["生成今日头条稿", "今日头条稿完成"]
-    assert body["progress"]["steps"][0]["output_kinds_expected"] == ["toutiao_post_json", "toutiao_image_prompts"]
+    assert body["progress"]["current_step"] == "queued"
+    assert body["progress"]["current_step_label"] == "今日头条任务排队中"
+    assert [step["label"] for step in body["progress"]["steps"]] == ["今日头条任务排队中", "生成今日头条稿", "校验今日头条稿", "今日头条稿完成"]
+    assert body["progress"]["steps"][1]["output_kinds_expected"] == ["toutiao_post_json"]
+
+
+def test_project_status_progress_uses_latest_platform_run_timing(tmp_path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(routes, "store", test_store)
+    record = test_store.create(
+        routes.ProjectCreate(url="https://example.com/video", target_platform="xhs", text_only=True)
+    )
+    _write_registered_upstream(test_store, record.project_id)
+    paths = test_store.paths(record.project_id)
+    write_json(paths.analysis_dir / "content-assets.json", _valid_content_assets())
+    test_store.add_output(record.project_id, "content_assets", paths.file_for_kind("content_assets"))
+    test_store.set_status(record.project_id, ProjectStatus.analysis_completed, "ready")
+
+    completed_statuses = {
+        "xhs": ProjectStatus.xhs_completed,
+        "toutiao": ProjectStatus.toutiao_completed,
+        "douyin": ProjectStatus.douyin_completed,
+        "bilibili": ProjectStatus.bilibili_completed,
+    }
+    for platform, completed_status in completed_statuses.items():
+        started, _record, missing = test_store.try_start_platform_produce(record.project_id, platform=platform)
+        assert started is True and missing == []
+        test_store.set_status(
+            record.project_id,
+            ProjectStatus.producing_article,
+            "producing",
+            {"platform": platform},
+        )
+        test_store.set_status(
+            record.project_id,
+            ProjectStatus.validating_content,
+            "validating",
+            {"platform": platform},
+        )
+        test_store.set_status(record.project_id, completed_status, "done", {"platform": platform})
+
+    status_path = paths.status_file()
+    payload = read_json(status_path)
+    run_times = {
+        "xhs": ("2026-07-17T00:00:00+00:00", "2026-07-17T00:01:00+00:00", "2026-07-17T00:02:00+00:00", "2026-07-17T00:03:00+00:00"),
+        "toutiao": ("2026-07-17T01:00:00+00:00", "2026-07-17T01:01:00+00:00", "2026-07-17T01:02:00+00:00", "2026-07-17T01:03:00+00:00"),
+        "douyin": ("2026-07-17T02:00:00+00:00", "2026-07-17T02:01:00+00:00", "2026-07-17T02:02:00+00:00", "2026-07-17T02:03:00+00:00"),
+        "bilibili": ("2026-07-17T03:00:00+00:00", "2026-07-17T03:01:00+00:00", "2026-07-17T03:02:00+00:00", "2026-07-17T03:03:00+00:00"),
+    }
+    statuses = ("queued", "producing_article", "validating_content")
+    for platform, times in run_times.items():
+        platform_logs = [
+            item
+            for item in payload["logs"]
+            if (item.get("details") or {}).get("platform") == platform
+            and item["status"] in {*statuses, completed_statuses[platform].value}
+        ][-4:]
+        assert [item["status"] for item in platform_logs] == [*statuses, completed_statuses[platform].value]
+        for item, timestamp in zip(platform_logs, times):
+            item["time"] = timestamp
+    payload["updated_at"] = run_times["bilibili"][-1]
+    write_json(status_path, payload)
+
+    body = TestClient(app).get(f"/api/projects/{record.project_id}/status").json()
+    progress = body["progress"]
+    assert progress["platform"] == "bilibili"
+    assert progress["started_at"] == run_times["bilibili"][0]
+    assert progress["elapsed_seconds"] == 180.0
+    assert [step["elapsed_seconds"] for step in progress["steps"][:3]] == [60.0, 60.0, 60.0]
 
 
 def test_project_status_progress_reports_image_generation_mode(tmp_path, monkeypatch):
@@ -1328,10 +1396,10 @@ def test_cancel_project_endpoint_marks_running_project_failed(tmp_path, monkeypa
     assert response.status_code == 200
     body = response.json()
     assert body["cancelled"] is True
-    assert body["status"] == "failed"
+    assert body["status"] == "stopped"
     assert body["error"]["code"] == "user_stopped"
     assert status.json()["can_cancel"] is False
-    assert test_store.get(project_id).status == ProjectStatus.failed
+    assert test_store.get(project_id).status == ProjectStatus.stopped
 
 
 def test_cancel_project_endpoint_noops_when_not_running(tmp_path, monkeypatch):
@@ -1386,7 +1454,12 @@ def test_rerun_downstream_endpoint_queues_existing_project(tmp_path, monkeypatch
     duplicate = client.post(f"/api/projects/{project_id}/rerun/downstream")
 
     assert response.status_code == 200
-    assert response.json() == {"project_id": project_id, "status": "queued", "scope": "downstream"}
+    assert response.json() == {
+        "project_id": project_id,
+        "status": "queued",
+        "scope": "downstream",
+        "platform": "xhs",
+    }
     assert called == [project_id]
     assert test_store.get(project_id).status == "planning_content"
     assert duplicate.status_code == 409
@@ -1482,7 +1555,12 @@ def test_rerun_visuals_endpoint_queues_existing_project(tmp_path, monkeypatch):
     duplicate = client.post(f"/api/projects/{project_id}/rerun/visuals")
 
     assert response.status_code == 200
-    assert response.json() == {"project_id": project_id, "status": "queued", "scope": "visuals_and_downstream"}
+    assert response.json() == {
+        "project_id": project_id,
+        "status": "queued",
+        "scope": "visuals_and_downstream",
+        "platform": "xhs",
+    }
     assert called == [project_id]
     assert test_store.get(project_id).status == "analyzing_visuals"
     assert duplicate.status_code == 409

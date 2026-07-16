@@ -125,6 +125,7 @@ def write_skipped_keyframes(
     paths: ProjectPaths,
     *,
     reason: str,
+    analysis_mode: str = "text_only",
 ) -> Dict[str, Any]:
     payload = {
         "video_file": metadata.get("video_file"),
@@ -135,7 +136,7 @@ def write_skipped_keyframes(
         "keyframes": [],
         "skipped": True,
         "skip_reason": reason,
-        "analysis_mode": "text_only",
+        "analysis_mode": analysis_mode,
     }
     write_json(paths.analysis_dir / "keyframes.json", payload)
     return payload
@@ -156,6 +157,7 @@ def extract_keyframes(
                 max_frames,
                 paths,
                 reason="No video file is available; continuing with transcript-only analysis.",
+                analysis_mode="transcript_only",
             )
         raise PipelineError(
             code="video_file_missing",

@@ -2,6 +2,7 @@ const app = document.querySelector("#app");
 const modalRoot = document.querySelector("#modal-root");
 
 const STATUS_META = {
+  queued: { label: "排队中", hint: "等待可用执行槽位" },
   created: { label: "任务已创建", hint: "准备进入解析队列" },
   ingesting: { label: "获取视频信息", hint: "yt-dlp 获取元数据、字幕和媒体" },
   transcribing: { label: "生成字幕时间轴", hint: "优先原字幕，无字幕时走 Whisper" },
@@ -9,13 +10,17 @@ const STATUS_META = {
   analyzing_visuals: { label: "识别画面文字", hint: "OCR 和基础视觉分析" },
   planning_content: { label: "生成创作底稿", hint: "提炼事实、观点、受众和选题方向" },
   analysis_completed: { label: "解析完成", hint: "可确认/编辑后产出图文" },
-  producing_article: { label: "生成小红书稿", hint: "生成标题、正文、标签和配图计划" },
+  producing_article: { label: "生成平台稿", hint: "生成标题、开头钩子和连续自然段正文" },
+  validating_content: { label: "校验文章", hint: "检查小标题、钩子、来源数据和改写程度" },
   xhs_completed: { label: "小红书稿完成", hint: "文章和图片提示词已生成，等待独立生图 API 渲染 PNG" },
   toutiao_completed: { label: "今日头条稿完成", hint: "文章和图片提示词已生成，等待独立生图 API 渲染 PNG" },
+  douyin_completed: { label: "抖音稿完成", hint: "文章、Word 和质量报告已生成" },
+  bilibili_completed: { label: "哔哩哔哩稿完成", hint: "文章、Word 和质量报告已生成" },
   writing_xhs: { label: "写入文章文件", hint: "写入 JSON、Markdown 和提示词" },
   rendering_cards: { label: "渲染图文卡片", hint: "生成小红书竖版 PNG 卡片" },
   completed: { label: "图文完成", hint: "文章、卡片和下载素材已准备好" },
   failed: { label: "处理失败", hint: "查看错误原因和已生成产物" },
+  stopped: { label: "已停止", hint: "任务已停止，中间产物保留" },
 };
 
 const STATUS_STEPS = [
@@ -26,9 +31,13 @@ const STATUS_STEPS = [
   ["analyzing_visuals", STATUS_META.analyzing_visuals.label, STATUS_META.analyzing_visuals.hint],
   ["planning_content", STATUS_META.planning_content.label, STATUS_META.planning_content.hint],
   ["analysis_completed", STATUS_META.analysis_completed.label, STATUS_META.analysis_completed.hint],
+  ["queued", STATUS_META.queued.label, STATUS_META.queued.hint],
   ["producing_article", STATUS_META.producing_article.label, STATUS_META.producing_article.hint],
+  ["validating_content", STATUS_META.validating_content.label, STATUS_META.validating_content.hint],
   ["xhs_completed", STATUS_META.xhs_completed.label, STATUS_META.xhs_completed.hint],
   ["toutiao_completed", STATUS_META.toutiao_completed.label, STATUS_META.toutiao_completed.hint],
+  ["douyin_completed", STATUS_META.douyin_completed.label, STATUS_META.douyin_completed.hint],
+  ["bilibili_completed", STATUS_META.bilibili_completed.label, STATUS_META.bilibili_completed.hint],
   ["writing_xhs", STATUS_META.writing_xhs.label, STATUS_META.writing_xhs.hint],
   ["rendering_cards", STATUS_META.rendering_cards.label, STATUS_META.rendering_cards.hint],
   ["completed", STATUS_META.completed.label, STATUS_META.completed.hint],
@@ -42,8 +51,10 @@ const STAGE_OUTPUTS = {
   planning_content: ["content_assets"],
   analysis_completed: ["content_assets", "asset_package"],
   producing_article: ["xhs_post_json", "image_prompts"],
-  xhs_completed: ["xhs_post_json", "xhs_post_md", "image_prompts", "asset_package"],
-  toutiao_completed: ["toutiao_post_json", "toutiao_post_md", "toutiao_image_prompts", "asset_package"],
+  xhs_completed: ["xhs_post_json", "xhs_post_md", "xhs_post_docx", "xhs_quality_report", "image_prompts", "asset_package"],
+  toutiao_completed: ["toutiao_post_json", "toutiao_post_md", "toutiao_post_docx", "toutiao_quality_report", "toutiao_image_prompts", "asset_package"],
+  douyin_completed: ["douyin_post_json", "douyin_post_md", "douyin_post_docx", "douyin_quality_report", "asset_package"],
+  bilibili_completed: ["bilibili_post_json", "bilibili_post_md", "bilibili_post_docx", "bilibili_quality_report", "asset_package"],
   writing_xhs: ["xhs_post_json", "xhs_post_md", "image_prompts", "asset_package"],
   rendering_cards: ["image_cards"],
   completed: [
@@ -54,10 +65,14 @@ const STAGE_OUTPUTS = {
     "content_assets",
     "xhs_post_json",
     "xhs_post_md",
+    "xhs_post_docx",
+    "xhs_quality_report",
     "image_prompts",
     "image_cards",
     "toutiao_post_json",
     "toutiao_post_md",
+    "toutiao_post_docx",
+    "toutiao_quality_report",
     "toutiao_image_prompts",
     "toutiao_image_cards",
     "asset_package",
@@ -74,6 +89,16 @@ const ROUTE_STATUS_OVERRIDES = {
     producing_article: { label: "生成小红书稿", hint: "生成小红书标题、正文、标签和配图计划" },
     rendering_cards: { label: "渲染图文卡片", hint: "生成小红书竖版 PNG 卡片" },
   },
+  douyin: {
+    queued: { label: "抖音任务排队中", hint: "等待文章生成槽位" },
+    producing_article: { label: "生成抖音稿", hint: "生成口播文章和发布文案" },
+    validating_content: { label: "校验抖音稿", hint: "检查钩子、事实和改写程度" },
+  },
+  bilibili: {
+    queued: { label: "哔哩哔哩任务排队中", hint: "等待文章生成槽位" },
+    producing_article: { label: "生成哔哩哔哩稿", hint: "生成动态或专栏型文章" },
+    validating_content: { label: "校验哔哩哔哩稿", hint: "检查结构、事实和改写程度" },
+  },
 };
 
 const ROUTE_STAGE_OUTPUTS = {
@@ -88,6 +113,8 @@ const ROUTE_STAGE_OUTPUTS = {
       "content_assets",
       "toutiao_post_json",
       "toutiao_post_md",
+      "toutiao_post_docx",
+      "toutiao_quality_report",
       "toutiao_image_prompts",
       "toutiao_image_cards",
       "asset_package",
@@ -105,6 +132,8 @@ const ROUTE_STAGE_OUTPUTS = {
       "content_assets",
       "xhs_post_json",
       "xhs_post_md",
+      "xhs_post_docx",
+      "xhs_quality_report",
       "image_prompts",
       "image_cards",
       "asset_package",
@@ -121,12 +150,24 @@ const FILE_KINDS = [
   ["content_assets", "创作底稿", "analysis/content-assets.json"],
   ["xhs_post_json", "小红书稿 JSON", "analysis/xiaohongshu-post.json"],
   ["xhs_post_md", "小红书稿 Markdown", "analysis/xhs-post.md"],
+  ["xhs_post_docx", "小红书稿 Word", "analysis/xhs-article.docx"],
+  ["xhs_quality_report", "小红书质量报告", "analysis/xhs-quality-report.json"],
   ["image_prompts", "图片提示词", "analysis/image-prompts.json"],
   ["image_cards", "图文卡片清单", "analysis/image-cards.json"],
   ["toutiao_post_json", "今日头条稿 JSON", "analysis/toutiao-post.json"],
   ["toutiao_post_md", "今日头条稿 Markdown", "analysis/toutiao-post.md"],
+  ["toutiao_post_docx", "今日头条稿 Word", "analysis/toutiao-article.docx"],
+  ["toutiao_quality_report", "今日头条质量报告", "analysis/toutiao-quality-report.json"],
   ["toutiao_image_prompts", "今日头条图片提示词", "analysis/toutiao-image-prompts.json"],
   ["toutiao_image_cards", "今日头条卡片清单", "analysis/toutiao-image-cards.json"],
+  ["douyin_post_json", "抖音稿 JSON", "analysis/douyin-post.json"],
+  ["douyin_post_md", "抖音稿 Markdown", "analysis/douyin-post.md"],
+  ["douyin_post_docx", "抖音稿 Word", "analysis/douyin-article.docx"],
+  ["douyin_quality_report", "抖音质量报告", "analysis/douyin-quality-report.json"],
+  ["bilibili_post_json", "哔哩哔哩稿 JSON", "analysis/bilibili-post.json"],
+  ["bilibili_post_md", "哔哩哔哩稿 Markdown", "analysis/bilibili-post.md"],
+  ["bilibili_post_docx", "哔哩哔哩稿 Word", "analysis/bilibili-article.docx"],
+  ["bilibili_quality_report", "哔哩哔哩质量报告", "analysis/bilibili-quality-report.json"],
   ["asset_package", "完整素材包", "analysis/asset-package.json"],
   ["run_metadata", "运行元数据", "analysis/run-metadata.json"],
 ];
@@ -149,6 +190,8 @@ const DETAIL_TABS = [
   ["assets", "创作底稿"],
   ["xhs", "小红书稿"],
   ["toutiao", "今日头条稿"],
+  ["douyin", "抖音稿"],
+  ["bilibili", "哔哩哔哩稿"],
   ["files", "文件下载"],
 ];
 
@@ -159,9 +202,12 @@ const CONTENT_ROUTES = {
     shortLabel: "XHS",
     postJson: "xhs_post_json",
     postMd: "xhs_post_md",
+    postDocx: "xhs_post_docx",
+    quality: "xhs_quality_report",
     prompts: "image_prompts",
     cards: "image_cards",
     completedStatus: "xhs_completed",
+    supportsImages: true,
     producePath: "produce",
     imagePath: "generate-images",
     postPatchPath: "xhs-post",
@@ -184,9 +230,12 @@ const CONTENT_ROUTES = {
     shortLabel: "头条",
     postJson: "toutiao_post_json",
     postMd: "toutiao_post_md",
+    postDocx: "toutiao_post_docx",
+    quality: "toutiao_quality_report",
     prompts: "toutiao_image_prompts",
     cards: "toutiao_image_cards",
     completedStatus: "toutiao_completed",
+    supportsImages: true,
     producePath: "produce/toutiao",
     imagePath: "generate-images/toutiao",
     postPatchPath: "toutiao-post",
@@ -203,20 +252,82 @@ const CONTENT_ROUTES = {
     llmMissingToast: "LLM 未配置，不能生成今日头条文章。请先到 LLM API 设置页配置。",
     emptyPostTitle: "今日头条稿尚不可用",
   },
+  douyin: {
+    key: "douyin",
+    label: "抖音",
+    shortLabel: "抖音",
+    postJson: "douyin_post_json",
+    postMd: "douyin_post_md",
+    postDocx: "douyin_post_docx",
+    quality: "douyin_quality_report",
+    prompts: "",
+    cards: "",
+    completedStatus: "douyin_completed",
+    supportsImages: false,
+    producePath: "produce/platform/douyin",
+    imagePath: "",
+    postPatchPath: "platform/douyin/post",
+    cardsPatchPath: "",
+    cardFilePath: "",
+    cardsDownloadPath: "",
+    bodyCopyId: "douyin-body",
+    title: "抖音文章",
+    emptyText: "配置 LLM 后点击左侧“一键产出平台稿”。",
+    postPreviewTitle: "抖音稿预览",
+    saveMessage: "抖音文章已保存，Markdown、Word 和质量报告已同步更新。",
+    articleReadyToast: "抖音稿已完成。",
+    produceToast: "已开始生成抖音稿。",
+    llmMissingToast: "LLM 未配置，不能生成抖音文章。请先到 LLM API 设置页配置。",
+    emptyPostTitle: "抖音稿尚不可用",
+  },
+  bilibili: {
+    key: "bilibili",
+    label: "哔哩哔哩",
+    shortLabel: "B站",
+    postJson: "bilibili_post_json",
+    postMd: "bilibili_post_md",
+    postDocx: "bilibili_post_docx",
+    quality: "bilibili_quality_report",
+    prompts: "",
+    cards: "",
+    completedStatus: "bilibili_completed",
+    supportsImages: false,
+    producePath: "produce/platform/bilibili",
+    imagePath: "",
+    postPatchPath: "platform/bilibili/post",
+    cardsPatchPath: "",
+    cardFilePath: "",
+    cardsDownloadPath: "",
+    bodyCopyId: "bilibili-body",
+    title: "哔哩哔哩文章",
+    emptyText: "配置 LLM 后点击左侧“一键产出平台稿”。",
+    postPreviewTitle: "哔哩哔哩稿预览",
+    saveMessage: "哔哩哔哩文章已保存，Markdown、Word 和质量报告已同步更新。",
+    articleReadyToast: "哔哩哔哩稿已完成。",
+    produceToast: "已开始生成哔哩哔哩稿。",
+    llmMissingToast: "LLM 未配置，不能生成哔哩哔哩文章。请先到 LLM API 设置页配置。",
+    emptyPostTitle: "哔哩哔哩稿尚不可用",
+  },
 };
+
+const sessionProjectId = window.sessionStorage.getItem("xhs.activeProjectId") || window.localStorage.getItem("xhs.activeProjectId") || "";
+const sessionContentRoute = window.sessionStorage.getItem("xhs.activeContentRoute") || window.localStorage.getItem("xhs.activeContentRoute") || "xhs";
+if (sessionProjectId) window.sessionStorage.setItem("xhs.activeProjectId", sessionProjectId);
+if (CONTENT_ROUTES[sessionContentRoute]) window.sessionStorage.setItem("xhs.activeContentRoute", sessionContentRoute);
 
 const state = {
   health: null,
   projects: [],
   summaries: new Map(),
-  activeProjectId: window.localStorage.getItem("xhs.activeProjectId") || "",
+  activeProjectId: sessionProjectId,
   activeStatus: null,
   detail: null,
   workbenchDetail: null,
   llmSettings: null,
   imageSettings: null,
   detailTab: "overview",
-  activeContentRoute: window.localStorage.getItem("xhs.activeContentRoute") || "xhs",
+  activeContentRoute: CONTENT_ROUTES[sessionContentRoute] ? sessionContentRoute : "xhs",
+  routeContextProjectId: "",
   transcriptQuery: "",
   pollTimer: null,
   pendingImageGenerationProjectId: "",
@@ -242,21 +353,23 @@ function pathFor(route) {
 }
 
 function statusClass(status) {
-  if (status === "completed") return "status-ok";
-  if (status === "failed") return "status-error";
+  if (["completed", "analysis_completed", "xhs_completed", "toutiao_completed", "douyin_completed", "bilibili_completed"].includes(status)) return "status-ok";
+  if (["failed", "stopped"].includes(status)) return "status-error";
   if (!status) return "";
   return `status-${String(status).replace(/[^a-z0-9_-]/gi, "")}`;
 }
 
 function platformFromDetails(details) {
   if (!details || typeof details !== "object") return "";
-  if (details.platform === "toutiao" || details.platform === "xhs") return details.platform;
+  if (CONTENT_ROUTES[details.platform]) return details.platform;
   return platformFromDetails(details.details);
 }
 
 function platformFromStatusData(statusData) {
   if (!statusData || typeof statusData !== "object") return "";
-  if (statusData.progress?.platform === "toutiao" || statusData.progress?.platform === "xhs") return statusData.progress.platform;
+  if (CONTENT_ROUTES[statusData.target_platform]) return statusData.target_platform;
+  if (CONTENT_ROUTES[statusData.record?.target_platform]) return statusData.record.target_platform;
+  if (CONTENT_ROUTES[statusData.progress?.platform]) return statusData.progress.platform;
   const logs = Array.isArray(statusData.logs) ? statusData.logs : [];
   for (let index = logs.length - 1; index >= 0; index -= 1) {
     const platform = platformFromDetails(logs[index]?.details);
@@ -264,6 +377,8 @@ function platformFromStatusData(statusData) {
   }
   const outputs = statusData.outputs || statusData.record?.outputs || {};
   if (outputs.toutiao_post_json || outputs.toutiao_post_md || outputs.toutiao_image_prompts || outputs.toutiao_image_cards) return "toutiao";
+  if (outputs.douyin_post_json || outputs.douyin_post_md) return "douyin";
+  if (outputs.bilibili_post_json || outputs.bilibili_post_md) return "bilibili";
   if (outputs.xhs_post_json || outputs.xhs_post_md || outputs.image_prompts || outputs.image_cards) return "xhs";
   return "";
 }
@@ -299,7 +414,7 @@ function currentContentRoute() {
 
 function setContentRoute(routeKey) {
   state.activeContentRoute = CONTENT_ROUTES[routeKey] ? routeKey : "xhs";
-  window.localStorage.setItem("xhs.activeContentRoute", state.activeContentRoute);
+  window.sessionStorage.setItem("xhs.activeContentRoute", state.activeContentRoute);
 }
 
 function routePost(detail, route = currentContentRoute()) {
@@ -307,11 +422,11 @@ function routePost(detail, route = currentContentRoute()) {
 }
 
 function routeCards(detail, route = currentContentRoute()) {
-  return detail?.files?.[route.cards];
+  return route.cards ? detail?.files?.[route.cards] : null;
 }
 
 function routePrompts(detail, route = currentContentRoute()) {
-  return detail?.files?.[route.prompts];
+  return route.prompts ? detail?.files?.[route.prompts] : null;
 }
 
 function routeStatus(status, route = currentContentRoute()) {
@@ -339,7 +454,7 @@ function isTextOnlyProject(detail = state.workbenchDetail) {
 }
 
 function isRunning(status) {
-  return Boolean(status && !["analysis_completed", "xhs_completed", "toutiao_completed", "completed", "failed"].includes(status));
+  return Boolean(status && !["analysis_completed", "xhs_completed", "toutiao_completed", "douyin_completed", "bilibili_completed", "completed", "failed", "stopped"].includes(status));
 }
 
 function shouldContinuePolling(projectId, status) {
@@ -403,6 +518,30 @@ function errorText(error) {
   }
   if (detail?.code === "llm_contract_invalid") {
     return "LLM 返回内容不符合真实产物格式，系统已停止生成，避免用模板或 demo 内容冒充分析。请重试或检查 LLM 配置。";
+  }
+  const llmDetails = detail?.details || {};
+  const llmContext = [
+    llmDetails.http_status ? `HTTP ${llmDetails.http_status}` : "",
+    llmDetails.model ? `模型 ${llmDetails.model}` : "",
+    llmDetails.attempts_made ? `已尝试 ${llmDetails.attempts_made}/${llmDetails.attempt_limit || llmDetails.attempts_made} 次` : "",
+  ].filter(Boolean).join("，");
+  if (detail?.code === "llm_authentication_failed") {
+    return `LLM 鉴权失败${llmContext ? `（${llmContext}）` : ""}。请核对 API Key、模型权限、账户余额和 Base URL；系统不会用本地低质量文章代替。`;
+  }
+  if (detail?.code === "llm_rate_limited") {
+    return `LLM 限流${llmContext ? `（${llmContext}）` : ""}。请稍后重试，或检查接口额度并降低并发任务数。`;
+  }
+  if (detail?.code === "llm_timeout") {
+    return `LLM 请求超时${llmContext ? `（${llmContext}）` : ""}。请检查接口延迟/网络，必要时在 LLM 设置中增大超时时间后重试。`;
+  }
+  if (detail?.code === "llm_network_error") {
+    return `无法连接 LLM 接口${llmContext ? `（${llmContext}）` : ""}。请检查 Base URL、DNS、TLS、网络和服务端可用性。`;
+  }
+  if (detail?.code === "llm_http_error") {
+    return `LLM 接口返回错误${llmContext ? `（${llmContext}）` : ""}。请查看项目日志中的脱敏响应摘要，核对模型名、请求额度和接口兼容性。`;
+  }
+  if (detail?.code === "llm_response_invalid") {
+    return `LLM 响应格式无效${llmContext ? `（${llmContext}）` : ""}。接口虽返回成功，但不是兼容的 chat/completions 结构，请检查模型和 OpenAI-compatible 配置。`;
   }
   if (detail?.message) return `${detail.code ? `${detail.code}: ` : ""}${detail.message}`;
   if (error?.message) return error.message;
@@ -502,8 +641,13 @@ async function apiFile(projectId, kind) {
     error.status = response.status;
     throw error;
   }
-  if (kind === "xhs_post_md" || kind === "toutiao_post_md") return response.text();
+  if (kind.endsWith("_post_md")) return response.text();
+  if (kind.endsWith("_post_docx")) return response.blob();
   return response.json();
+}
+
+function isBinaryFileKind(kind) {
+  return kind.endsWith("_post_docx");
 }
 
 function routeInfo() {
@@ -549,7 +693,7 @@ function shell({ title, subtitle, mark, actions = "", body = "" }) {
           <span class="brand-mark">X</span>
           <div>
             <h1>视频图文生产</h1>
-            <p>Video-to-XHS Workbench</p>
+            <p>Multi-platform Content Workbench</p>
           </div>
         </div>
         <nav class="nav-group" aria-label="主导航">
@@ -718,13 +862,13 @@ async function loadDetail(projectId) {
   const files = {};
   await Promise.allSettled(
     FILE_KINDS.map(async ([kind]) => {
-      if (!outputs[kind]) return;
+      if (!outputs[kind] || isBinaryFileKind(kind)) return;
       files[kind] = await apiFile(projectId, kind);
     }),
   );
   state.detail = { projectId, record, status, files };
   state.activeProjectId = projectId;
-  window.localStorage.setItem("xhs.activeProjectId", projectId);
+  window.sessionStorage.setItem("xhs.activeProjectId", projectId);
   await hydrateProjectSummary(record);
   return state.detail;
 }
@@ -739,11 +883,15 @@ async function loadWorkbenchDetail(projectId) {
   const files = {};
   await Promise.allSettled(
     FILE_KINDS.map(async ([kind]) => {
-      if (!outputs[kind]) return;
+      if (!outputs[kind] || isBinaryFileKind(kind)) return;
       files[kind] = await apiFile(projectId, kind);
     }),
   );
   state.workbenchDetail = { projectId, record, status, files };
+  if (state.routeContextProjectId !== projectId && CONTENT_ROUTES[record.target_platform]) {
+    setContentRoute(record.target_platform);
+  }
+  state.routeContextProjectId = projectId;
   await hydrateProjectSummary(record);
   return state.workbenchDetail;
 }
@@ -817,9 +965,9 @@ function renderCreateJobPanel() {
   const selectedRouteStatus = routeStatus(detail?.status || state.activeStatus, route);
   const llmReady = state.llmSettings ? (!state.llmSettings.auth_required || state.llmSettings.api_key_configured) : false;
   const canProduceArticle = Boolean(detail?.status?.can_produce && hasAnalysis && !isRunning(status) && llmReady);
-  const canGenerateImages = Boolean(!textOnly && selectedRouteStatus.can_generate_images && hasPost && !hasCards && !isRunning(status));
+  const canGenerateImages = Boolean(route.supportsImages && !textOnly && selectedRouteStatus.can_generate_images && hasPost && !hasCards && !isRunning(status));
   const produceReady = canProduceArticle || canGenerateImages;
-  const produceLabel = textOnly ? "一键产出文章" : (canGenerateImages ? "继续生成图片卡片" : "一键产出图文");
+  const produceLabel = textOnly || !route.supportsImages ? "一键产出文章" : (canGenerateImages ? "继续生成图片卡片" : "一键产出图文");
   const llmNote = llmReady
     ? `LLM 已配置，可在“LLM 配置”页自检连通性；${route.label}稿生成依赖实时接口稳定性。${textOnly ? "当前项目为纯文案模式，不会生成图片卡片。" : ""}`
     : "LLM 未配置：可分析解析；文章生成不能伪造。纯文案模式只产出文章，不调用生图。";
@@ -940,7 +1088,9 @@ function renderWorkbenchStatusCard() {
         ${statusPill(status.status, "", currentContentRoute(), status)}
       </div>
       ${renderProgressSummary(status)}
+      ${status.execution?.state === "queued" ? `<p class="small-text">当前队列位置：${Number(status.execution.queue_position || 0)}；可同时在其他窗口提交不同项目。</p>` : ""}
       ${status.error ? errorState(errorText(status.error)) : ""}
+      ${status.can_cancel ? `<button class="danger-button" data-action="cancel-project" data-project-id="${escapeHtml(state.activeProjectId)}" type="button">强制停止</button>` : ""}
       ${renderStatusTimeline(status)}
       ${renderProgressLogPanel(status)}
     </section>
@@ -1168,18 +1318,41 @@ function renderProducePanel(detail) {
       <div class="row between wrap">
         <div class="section-title">
           <h3>${escapeHtml(textOnly ? `${route.label}文章` : route.title)}</h3>
-          <p>${escapeHtml(textOnly ? "纯文案模式只根据字幕/文案解析生成文章，不生成截图、关键帧或 PNG 卡片。" : "文章由 Produce 生成；PNG 卡片由独立生图 API 渲染，可编辑后重新出图。")}</p>
+          <p>${escapeHtml(textOnly || !route.supportsImages ? "根据字幕/文案解析生成文章、Word 和质量报告；该路线不生成图片。" : "文章由 Produce 生成；PNG 卡片由独立生图 API 渲染，可编辑后重新出图。")}</p>
         </div>
         <div class="row wrap">
           <button class="ghost-button" data-action="save-post" type="button" ${post ? "" : "disabled"}>保存文章</button>
-          ${textOnly ? "" : `<button class="ghost-button" data-action="save-image-cards" type="button" ${cards ? "" : "disabled"}>保存卡片</button>`}
+          ${textOnly || !route.supportsImages ? "" : `<button class="ghost-button" data-action="save-image-cards" type="button" ${cards ? "" : "disabled"}>保存卡片</button>`}
         </div>
       </div>
       ${post ? renderArticleEditor(post) : emptyState("文章尚未生成", route.emptyText)}
-      ${!textOnly && cards ? renderImageCardGallery(detail, cards, route) : ""}
+      ${post ? renderQualitySummary(detail.files?.[route.quality], post) : ""}
+      ${!textOnly && route.supportsImages && cards ? renderImageCardGallery(detail, cards, route) : ""}
       ${renderWorkbenchDownloads(detail, route)}
       <div id="produce-save-message"></div>
     </section>
+  `;
+}
+
+function renderQualitySummary(report, post) {
+  if (!report) return "";
+  const similarity = report.similarity || {};
+  const data = report.data_concretization || {};
+  const rewritePercent = Math.round(Number(similarity.estimated_rewrite_degree || 0) * 100);
+  return `
+    <div class="summary-block">
+      <div class="row between wrap">
+        <h4>文章质量校验</h4>
+        <span class="mini-pill ${report.passed ? "status-ok" : "status-error"}">${report.passed ? "已通过" : "未通过"}</span>
+      </div>
+      <div class="meta-grid compact-meta">
+        <div class="meta-item"><span>估算改写程度</span><b>${rewritePercent}%</b></div>
+        <div class="meta-item"><span>最长重复片段</span><b>${Number(similarity.longest_common_fragment_chars || 0)} 字</b></div>
+        <div class="meta-item"><span>定向重写次数</span><b>${Number(report.rewrite_count || 0)}</b></div>
+        <div class="meta-item"><span>数据转换追溯</span><b>${Number((data.generated_ratio_expressions || []).length + (data.generated_population_expressions || []).length)} 项</b></div>
+      </div>
+      <p class="small-text">${escapeHtml(report.policy?.originality_note || "改写程度是文本估算，不是平台原创认证。")}</p>
+    </div>
   `;
 }
 
@@ -1242,14 +1415,19 @@ function renderImageCardGallery(detail, imageCards, route = currentContentRoute(
 function renderWorkbenchDownloads(detail, route = currentContentRoute()) {
   const outputs = detail.status.outputs || {};
   const textOnly = isTextOnlyProject(detail);
+  const downloadButton = (ready, label, href) => ready
+    ? `<a class="ghost-button" href="${href}">${label}</a>`
+    : `<span class="ghost-button disabled" aria-disabled="true">${label}</span>`;
   return `
     <div class="download-strip">
-      <a class="ghost-button ${outputs[route.postMd] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.postMd}">Markdown</a>
-      <a class="ghost-button ${outputs[route.postJson] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.postJson}">文章 JSON</a>
-      ${textOnly ? "" : `
-        <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${route.cards}">卡片 JSON</a>
-        <a class="ghost-button ${outputs[route.cards] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/${route.cardsDownloadPath}">卡片 ZIP</a>
-        <a class="ghost-button ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">关键帧 ZIP</a>
+      ${downloadButton(outputs[route.postMd], "Markdown", `/api/projects/${detail.projectId}/files/${route.postMd}`)}
+      ${downloadButton(outputs[route.postJson], "文章 JSON", `/api/projects/${detail.projectId}/files/${route.postJson}`)}
+      ${downloadButton(outputs[route.postDocx], "Word", `/api/projects/${detail.projectId}/files/${route.postDocx}`)}
+      ${downloadButton(outputs[route.quality], "质量报告", `/api/projects/${detail.projectId}/files/${route.quality}`)}
+      ${textOnly || !route.supportsImages ? "" : `
+        ${downloadButton(outputs[route.cards], "卡片 JSON", `/api/projects/${detail.projectId}/files/${route.cards}`)}
+        ${downloadButton(outputs[route.cards], "卡片 ZIP", `/api/projects/${detail.projectId}/${route.cardsDownloadPath}`)}
+        ${downloadButton(outputs.keyframes, "关键帧 ZIP", `/api/projects/${detail.projectId}/download/frames`)}
       `}
       <a class="button" href="/api/projects/${detail.projectId}/download">完整 ZIP</a>
     </div>
@@ -1279,6 +1457,7 @@ function renderCurrentTaskPanel() {
         </div>
         <div class="row wrap">
           ${statusPill(state.activeStatus.status, "", currentContentRoute(), state.activeStatus)}
+          ${state.activeStatus.can_cancel ? `<button class="danger-button" data-action="cancel-project" data-project-id="${escapeHtml(state.activeProjectId)}" type="button">强制停止</button>` : ""}
           <a class="ghost-button" href="/projects/${state.activeProjectId}" data-route="/projects/${state.activeProjectId}">查看详情</a>
         </div>
       </div>
@@ -1453,6 +1632,7 @@ function renderProjectTable(projects, options = {}) {
                   <div class="row wrap">
                     <a class="ghost-button" href="/projects/${project.project_id}" data-route="/projects/${project.project_id}">查看</a>
                     <a class="ghost-button" href="/api/projects/${project.project_id}/download">ZIP</a>
+                    ${running ? `<button class="danger-button" data-action="cancel-project" data-project-id="${project.project_id}" type="button">停止</button>` : ""}
                     <button class="danger-button" data-action="delete-project" data-project-id="${project.project_id}" ${running ? "disabled" : ""} type="button">删除</button>
                   </div>
                 </td>
@@ -1614,6 +1794,10 @@ function renderDetailTabContent(detail) {
       return renderPostTab(detail, CONTENT_ROUTES.xhs);
     case "toutiao":
       return renderPostTab(detail, CONTENT_ROUTES.toutiao);
+    case "douyin":
+      return renderPostTab(detail, CONTENT_ROUTES.douyin);
+    case "bilibili":
+      return renderPostTab(detail, CONTENT_ROUTES.bilibili);
     case "files":
       return renderFilesTab(detail);
     case "overview":
@@ -1820,6 +2004,7 @@ function renderPostTab(detail, route) {
   if (!post) return `<section class="panel pad">${emptyState(route.emptyPostTitle, "配置 LLM 并重跑文案生成后，这里会显示标题、正文和配图规划。")}</section>`;
   const textOnly = isTextOnlyProject(detail);
   const prompts = routePrompts(detail, route)?.image_prompts || [];
+  const quality = detail.files?.[route.quality];
   return `
     <div class="grid two">
       <section class="panel pad post-preview">
@@ -1833,8 +2018,17 @@ function renderPostTab(detail, route) {
         <div id="${escapeHtml(route.bodyCopyId)}" class="post-body">${escapeHtml(post.body)}</div>
         ${renderChipBlock("标签", post.hashtags)}
         <div class="asset-item"><h4>发布建议</h4><p>${escapeHtml(post.publish_suggestion || "")}</p></div>
+        ${renderQualitySummary(quality, post)}
+        <div class="download-strip">
+          ${detail.status.outputs?.[route.postDocx]
+            ? `<a class="ghost-button" href="/api/projects/${detail.projectId}/files/${route.postDocx}">下载 Word</a>`
+            : '<span class="ghost-button disabled" aria-disabled="true">下载 Word</span>'}
+          ${detail.status.outputs?.[route.postMd]
+            ? `<a class="ghost-button" href="/api/projects/${detail.projectId}/files/${route.postMd}">下载 Markdown</a>`
+            : '<span class="ghost-button disabled" aria-disabled="true">下载 Markdown</span>'}
+        </div>
       </section>
-      ${textOnly ? "" : `<section class="panel pad stack">
+      ${textOnly || !route.supportsImages ? "" : `<section class="panel pad stack">
         ${renderAssetList("配图规划", post.image_plan, (item) => `
           <h4>第 ${escapeHtml(item.page)} 页 · ${escapeHtml(item.role)} · ${escapeHtml(item.caption)}</h4>
           <p>${escapeHtml(item.content_point || "")}</p>
@@ -1863,14 +2057,21 @@ function renderFilesTab(detail) {
         <a id="download-all" class="download-card" href="/api/projects/${detail.projectId}/download">
           <b>完整 ZIP</b><span>runtime/projects/${escapeHtml(detail.projectId)}</span>
         </a>
-        ${textOnly ? "" : `<a id="download-frames-zip" class="download-card ${outputs.keyframes ? "" : "disabled"}" href="/api/projects/${detail.projectId}/download/frames">
+        ${textOnly ? "" : (outputs.keyframes ? `<a id="download-frames-zip" class="download-card" href="/api/projects/${detail.projectId}/download/frames">
           <b>关键帧素材 ZIP</b><span>frames/*.jpg</span>
-        </a>`}
-        ${FILE_KINDS.map(([kind, label, path]) => `
-          <a id="download-${kind.replaceAll("_", "-")}" class="download-card ${outputs[kind] ? "" : "disabled"}" href="/api/projects/${detail.projectId}/files/${kind}">
+        </a>` : `<div id="download-frames-zip" class="download-card disabled" aria-disabled="true">
+          <b>关键帧素材 ZIP</b><span>frames/*.jpg</span>
+        </div>`)}
+        ${FILE_KINDS.map(([kind, label, path]) => outputs[kind] ? `
+          <a id="download-${kind.replaceAll("_", "-")}" class="download-card" href="/api/projects/${detail.projectId}/files/${kind}">
             <b>${escapeHtml(label)}</b>
             <span class="mono">${escapeHtml(path)}</span>
           </a>
+        ` : `
+          <div id="download-${kind.replaceAll("_", "-")}" class="download-card disabled" aria-disabled="true">
+            <b>${escapeHtml(label)}</b>
+            <span class="mono">${escapeHtml(path)}</span>
+          </div>
         `).join("")}
       </div>
       <pre class="json-view">${prettyJson(outputs)}</pre>
@@ -1907,7 +2108,7 @@ async function renderLlmSettings() {
       <div class="grid two">
         <section class="panel">
           <div class="panel-header">
-            <div><h3>文案 LLM 配置</h3><p>生成小红书文章、标题、标签和图片提示词。</p></div>
+            <div><h3>文案 LLM 配置</h3><p>生成目标平台文章、标题、标签和必要的图片提示词。</p></div>
             <span class="status-pill ${settings.api_key_configured ? "status-ok" : "status-warning"}">${settings.api_key_configured ? "密钥已配置" : "密钥未配置"}</span>
           </div>
           <div class="panel-body">
@@ -1927,6 +2128,7 @@ async function renderLlmSettings() {
                 <label class="field">超时时间（毫秒）<input name="timeout_ms" type="number" min="1000" max="600000" value="${escapeHtml(settings.timeout_ms || 60000)}" /></label>
                 <label class="field">最大输入字符<input name="max_chars" type="number" min="1000" max="2000000" value="${escapeHtml(settings.max_chars || 60000)}" /></label>
               </div>
+              <label class="field">失败重试次数<input name="retry_attempts" type="number" min="1" max="10" value="${escapeHtml(settings.retry_attempts || 3)}" /></label>
               <button class="button" type="submit">保存配置</button>
               <div id="llm-settings-message"></div>
             </form>
@@ -2094,7 +2296,7 @@ function startPolling(projectId) {
       const route = CONTENT_ROUTES[state.pendingImageGenerationRoute] || currentContentRoute();
       const selectedRouteStatus = routeStatus(status, route);
       const textOnly = Boolean(status.text_only || state.workbenchDetail?.record?.text_only);
-      if (!textOnly && status.status === route.completedStatus && state.pendingImageGenerationProjectId === projectId) {
+      if (!textOnly && route.supportsImages && status.status === route.completedStatus && state.pendingImageGenerationProjectId === projectId) {
         if (selectedRouteStatus.can_generate_images && !status.outputs?.[route.cards]) {
           try {
             await apiPost(`/api/projects/${projectId}/${route.imagePath}`, { style: "clean" });
@@ -2111,7 +2313,7 @@ function startPolling(projectId) {
           state.pendingImageGenerationRoute = "";
         }
       }
-      if (textOnly || status.status === "completed" || status.status === "failed") {
+      if (textOnly || !route.supportsImages || ["completed", "failed", "stopped"].includes(status.status)) {
         state.pendingImageGenerationProjectId = "";
         state.pendingImageGenerationRoute = "";
       }
@@ -2150,6 +2352,7 @@ async function submitProject(form) {
   errorBox.innerHTML = "";
   const payload = {
     url: form.elements.url.value.trim(),
+    target_platform: currentContentRoute().key,
     language: form.elements.language.value,
     style: form.elements.style.value,
     max_frames: Number(form.elements.max_frames.value || 12),
@@ -2160,7 +2363,7 @@ async function submitProject(form) {
   try {
     const created = await apiPost("/api/projects/analyze", payload);
     state.activeProjectId = created.project_id;
-    window.localStorage.setItem("xhs.activeProjectId", created.project_id);
+    window.sessionStorage.setItem("xhs.activeProjectId", created.project_id);
     await loadProjects();
     await loadStatus(created.project_id);
     toast(`已开始分析解析：${created.project_id}`);
@@ -2186,7 +2389,7 @@ async function produceActiveProject() {
   const hasCards = routeHasCards(detail, route);
   const textOnly = isTextOnlyProject(detail);
   try {
-    if (!textOnly && hasPost && !hasCards && selectedRouteStatus.can_generate_images) {
+    if (!textOnly && route.supportsImages && hasPost && !hasCards && selectedRouteStatus.can_generate_images) {
       await apiPost(`/api/projects/${state.activeProjectId}/${route.imagePath}`, { style: "clean" });
       state.pendingImageGenerationProjectId = "";
       state.pendingImageGenerationRoute = "";
@@ -2199,10 +2402,10 @@ async function produceActiveProject() {
       return;
     }
     const contentAssets = collectContentAssetsFromEditors();
-    state.pendingImageGenerationProjectId = textOnly ? "" : state.activeProjectId;
-    state.pendingImageGenerationRoute = textOnly ? "" : route.key;
+    state.pendingImageGenerationProjectId = textOnly || !route.supportsImages ? "" : state.activeProjectId;
+    state.pendingImageGenerationRoute = textOnly || !route.supportsImages ? "" : route.key;
     await apiPost(`/api/projects/${state.activeProjectId}/${route.producePath}`, { content_assets: contentAssets });
-    toast(textOnly ? `已开始生成${route.label}文章；纯文案模式不会生成图片卡片。` : route.produceToast);
+    toast(textOnly || !route.supportsImages ? `已开始生成${route.label}文章。` : route.produceToast);
     await renderDashboard();
   } catch (error) {
     state.pendingImageGenerationProjectId = "";
@@ -2319,6 +2522,7 @@ async function saveLlmSettings(form) {
     max_tokens: Number(data.get("max_tokens") || 1200),
     timeout_ms: Number(data.get("timeout_ms") || 60000),
     max_chars: Number(data.get("max_chars") || 60000),
+    retry_attempts: Number(data.get("retry_attempts") || 3),
   };
   const apiKey = String(data.get("api_key") || "").trim();
   if (apiKey) payload.api_key = apiKey;
@@ -2395,7 +2599,7 @@ async function deleteProject(projectId) {
     if (state.activeProjectId === projectId) {
       state.activeProjectId = "";
       state.activeStatus = null;
-      window.localStorage.removeItem("xhs.activeProjectId");
+      window.sessionStorage.removeItem("xhs.activeProjectId");
     }
     toast(`项目已删除：${projectId}`);
     if (routeInfo().name === "project-detail") {
@@ -2425,7 +2629,7 @@ async function rerunProject(projectId, scope) {
   try {
     await apiPost(`/api/projects/${projectId}/rerun/${endpoint}`);
     state.activeProjectId = projectId;
-    window.localStorage.setItem("xhs.activeProjectId", projectId);
+    window.sessionStorage.setItem("xhs.activeProjectId", projectId);
     toast(scope === "visuals" ? "已开始重跑视觉/OCR" : "已开始重跑文案生成");
     await renderRoute();
   } catch (error) {
@@ -2435,7 +2639,7 @@ async function rerunProject(projectId, scope) {
 
 async function selectWorkbenchProject(projectId) {
   state.activeProjectId = projectId;
-  window.localStorage.setItem("xhs.activeProjectId", projectId);
+  window.sessionStorage.setItem("xhs.activeProjectId", projectId);
   await renderDashboard();
 }
 

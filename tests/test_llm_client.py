@@ -95,6 +95,114 @@ def test_llm_request_failure_redacts_sensitive_base_url_query(monkeypatch):
     assert error["details"]["base_url"] == "https://example.test/v1?api_key=%5Bredacted%5D&keep=visible"
 
 
+@pytest.mark.parametrize(
+    ("status_code", "expected_code"),
+    [
+        (401, "llm_authentication_failed"),
+        (403, "llm_authentication_failed"),
+        (429, "llm_rate_limited"),
+        (500, "llm_http_error"),
+    ],
+)
+def test_llm_http_failures_are_structured_and_redacted(monkeypatch, status_code, expected_code):
+    import httpx
+
+    client = LLMClient()
+    client.api_key = "secret-token"
+    client.base_url = "https://example.test/v1"
+    client.model = "model-a"
+    client.retry_attempts = 2
+    monkeypatch.setattr(llm_client_module.time, "sleep", lambda _: None)
+
+    def fake_post(url, headers, json, timeout):
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            status_code,
+            json={"error": {"message": "Bearer secret-token rejected"}},
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    with pytest.raises(PipelineError) as exc_info:
+        client.chat_text([{"role": "user", "content": "hi"}], step="planning_content", force_json=False)
+
+    error = exc_info.value.to_dict()
+    assert error["code"] == expected_code
+    assert error["details"]["http_status"] == status_code
+    assert error["details"]["model"] == "model-a"
+    assert error["details"]["attempt_limit"] == 2
+    expected_attempts = 1 if status_code in {401, 403} else 2
+    assert error["details"]["attempts_made"] == expected_attempts
+    assert "secret-token" not in str(error)
+    assert "[redacted]" in error["details"]["response_excerpt"]
+
+
+def test_llm_timeout_reports_attempts_and_timeout(monkeypatch):
+    import httpx
+
+    client = LLMClient()
+    client.api_key = "key"
+    client.base_url = "https://example.test/v1"
+    client.retry_attempts = 2
+    monkeypatch.setattr(llm_client_module.time, "sleep", lambda _: None)
+
+    def fail_post(url, **kwargs):
+        raise httpx.ReadTimeout("read timed out", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fail_post)
+
+    with pytest.raises(PipelineError) as exc_info:
+        client.chat_text(
+            [{"role": "user", "content": "hi"}],
+            step="planning_content",
+            timeout_seconds=4.5,
+        )
+
+    error = exc_info.value.to_dict()
+    assert error["code"] == "llm_timeout"
+    assert error["details"]["attempts_made"] == 2
+    assert error["details"]["attempt_limit"] == 2
+    assert error["details"]["timeout_seconds"] == 4.5
+
+
+def test_llm_network_error_is_distinct_from_timeout(monkeypatch):
+    import httpx
+
+    client = LLMClient()
+    client.api_key = "key"
+    client.base_url = "https://example.test/v1"
+    monkeypatch.setattr(llm_client_module.time, "sleep", lambda _: None)
+
+    def fail_post(url, **kwargs):
+        raise httpx.ConnectError("dns failed", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fail_post)
+
+    with pytest.raises(PipelineError) as exc_info:
+        client.chat_text([{"role": "user", "content": "hi"}], step="planning_content", attempts=1)
+
+    assert exc_info.value.to_dict()["code"] == "llm_network_error"
+
+
+def test_llm_success_with_invalid_payload_is_structured(monkeypatch):
+    import httpx
+
+    client = LLMClient()
+    client.api_key = "key"
+    client.base_url = "https://example.test/v1"
+
+    def fake_post(url, headers, json, timeout):
+        return httpx.Response(200, json={"result": "not chat completions"}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    with pytest.raises(PipelineError) as exc_info:
+        client.chat_text([{"role": "user", "content": "hi"}], step="planning_content")
+
+    assert exc_info.value.to_dict()["code"] == "llm_response_invalid"
+
+
 def test_llm_self_test_redacts_base_url_without_key():
     client = LLMClient()
     client.api_key = None

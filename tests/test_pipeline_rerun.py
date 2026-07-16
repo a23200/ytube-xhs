@@ -144,7 +144,7 @@ class FakeLLMClient:
                 "target_audience": ["目标用户"],
                 "titles": ["标题1", "标题2", "标题3", "标题4", "标题5"],
                 "cover_text": "封面文案",
-                "hook": "开头用自己的话提炼重点。",
+                "hook": "看似只是整理内容，结果真正拉开差距的，反而是先核对证据再下判断。",
                 "body": "这条内容可以整理成三个行动提醒，先看证据，再做判断，最后形成自己的表达。",
                 "image_plan": [
                     {
@@ -300,7 +300,113 @@ def test_downstream_rerun_uses_existing_artifacts(tmp_path: Path, monkeypatch):
     assert (paths.analysis_dir / "image-prompts.json").exists()
     assert (paths.analysis_dir / "xhs-post.md").exists()
     assert read_json(paths.analysis_dir / "asset-package.json")["content_assets"]["one_sentence_summary"] == "一句话总结"
+    verification = verify_project(paths.project_dir)
+    assert verification["completed_ok"] is True, verification
+
+
+def test_downstream_rerun_uses_persisted_non_xhs_platform(tmp_path: Path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(pipeline, "store", test_store)
+    record = test_store.create(
+        ProjectCreate(
+            url="https://example.com/video",
+            target_platform="bilibili",
+            language="zh",
+            style="清单",
+            use_whisper=True,
+            max_frames=8,
+        )
+    )
+    paths = test_store.paths(record.project_id)
+    _write_resume_artifacts(test_store, record.project_id)
+    _patch_fake_llm(monkeypatch)
+
+    pipeline.run_project_downstream_pipeline(record.project_id)
+
+    updated = test_store.get(record.project_id)
+    assert updated.target_platform == "bilibili"
+    assert updated.status == "bilibili_completed"
+    assert updated.outputs["bilibili_post_json"] == "analysis/bilibili-post.json"
+    assert updated.outputs["bilibili_post_docx"] == "analysis/bilibili-article.docx"
+    assert "xhs_post_json" not in updated.outputs
+    assert not (paths.analysis_dir / "xiaohongshu-post.json").exists()
     assert verify_project(paths.project_dir)["completed_ok"] is True
+
+
+def test_legacy_full_pipeline_uses_selected_platform_and_renders_when_supported(tmp_path: Path, monkeypatch):
+    test_store = ProjectStore(tmp_path)
+    monkeypatch.setattr(pipeline, "store", test_store)
+    record = test_store.create(
+        ProjectCreate(
+            url="https://example.com/video",
+            target_platform="toutiao",
+            language="zh",
+            style="清单",
+            use_whisper=True,
+            max_frames=8,
+        )
+    )
+    paths = test_store.paths(record.project_id)
+    video_path = paths.source_dir / "source.mp4"
+    frame_path = paths.frames_dir / "frame_0001.jpg"
+    video_path.write_bytes(b"mp4")
+    _write_test_jpeg(frame_path)
+
+    def fake_ingest(url, language, paths, **kwargs):
+        payload = {
+            "video_id": "v1",
+            "url": url,
+            "title": "source",
+            "author": "author",
+            "duration": 12,
+            "video_file": str(video_path),
+            "available_subtitles": ["zh"],
+            "automatic_captions": [],
+        }
+        write_json(paths.source_dir / "metadata.json", payload)
+        return payload
+
+    def fake_transcript(metadata, language, use_whisper, paths):
+        payload = {
+            "source": "subtitle",
+            "segment_count": 1,
+            "segments": [{"start": 0.0, "end": 1.0, "text": "真实字幕证据", "source": "subtitle"}],
+        }
+        write_json(paths.transcript_dir / "transcript.json", payload)
+        return payload
+
+    def fake_keyframes(metadata, transcript, max_frames, paths):
+        payload = {
+            "frame_count": 1,
+            "keyframes": [{"time": 0.5, "path": str(frame_path), "score": 0.9, "reason": "test"}],
+        }
+        write_json(paths.analysis_dir / "keyframes.json", payload)
+        return payload
+
+    def fake_visual(keyframes, language, paths, use_ocr=True):
+        payload = {"frames": [_visual_frame(frame_path)], "warnings": []}
+        write_json(paths.analysis_dir / "visual-analysis.json", payload)
+        return payload
+
+    monkeypatch.setattr(pipeline, "ingest_video", fake_ingest)
+    monkeypatch.setattr(pipeline, "build_transcript", fake_transcript)
+    monkeypatch.setattr(pipeline, "extract_keyframes", fake_keyframes)
+    monkeypatch.setattr(pipeline, "analyze_visuals", fake_visual)
+    _patch_fake_llm(monkeypatch)
+    _patch_local_image_renderer(monkeypatch)
+
+    pipeline.run_project_pipeline(record.project_id)
+
+    updated = test_store.get(record.project_id)
+    assert updated.target_platform == "toutiao"
+    assert updated.status == "completed"
+    assert updated.outputs["toutiao_post_json"] == "analysis/toutiao-post.json"
+    assert updated.outputs["toutiao_image_cards"] == "analysis/toutiao-image-cards.json"
+    assert "xhs_post_json" not in updated.outputs
+    assert (paths.toutiao_cards_dir / "cover.png").exists()
+    assert not (paths.cards_dir / "cover.png").exists()
+    verification = verify_project(paths.project_dir)
+    assert verification["completed_ok"] is True, verification
 
 
 def test_analysis_pipeline_uses_local_basic_assets_when_llm_fails(tmp_path: Path, monkeypatch):
@@ -431,8 +537,11 @@ def test_analysis_pipeline_continues_from_transcript_only_ingest(tmp_path: Path,
     assert updated.outputs["visual_analysis"] == "analysis/visual-analysis.json"
     assert updated.outputs["content_assets"] == "analysis/content-assets.json"
     assert read_json(paths.analysis_dir / "keyframes.json")["skipped"] is True
+    assert read_json(paths.analysis_dir / "keyframes.json")["analysis_mode"] == "transcript_only"
     assert read_json(paths.analysis_dir / "visual-analysis.json")["skipped"] is True
+    assert read_json(paths.analysis_dir / "visual-analysis.json")["analysis_mode"] == "transcript_only"
     assert read_json(paths.analysis_dir / "content-assets.json")["one_sentence_summary"] == "一句话总结"
+    assert read_json(paths.analysis_dir / "content-assets.json")["source_analysis_mode"] == "transcript_only"
     assert "media 403; transcript-only" in updated.warnings
 
 
@@ -644,7 +753,7 @@ def test_produce_pipeline_requires_llm_and_does_not_fake_outputs(tmp_path: Path,
     def fake_write_xhs(*args, **kwargs):
         raise PipelineError("llm_unavailable", "missing LLM", "producing_article")
 
-    monkeypatch.setattr(pipeline, "write_xhs_post", fake_write_xhs)
+    monkeypatch.setattr(pipeline, "write_platform_post", fake_write_xhs)
 
     pipeline.run_project_produce_pipeline(record.project_id)
 
@@ -716,7 +825,10 @@ def test_produce_pipeline_generates_post_markdown_and_image_prompts(tmp_path: Pa
     assert not (paths.cards_dir / "cover.png").exists()
     package = read_json(paths.analysis_dir / "asset-package.json")
     assert package["materials"]["card_paths"] == []
-    assert verify_project(paths.project_dir)["completed_ok"] is False
+    # Article completion is a valid terminal state before the optional image-card step.
+    verification = verify_project(paths.project_dir)
+    assert verification["completed_ok"] is True
+    assert verification["platform"] == "xhs"
 
 
 def test_text_only_produce_pipeline_generates_article_without_image_prompts(tmp_path: Path, monkeypatch):

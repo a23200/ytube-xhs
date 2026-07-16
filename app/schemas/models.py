@@ -1,10 +1,14 @@
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, HttpUrl
 
+SUPPORTED_TARGET_PLATFORMS = ("xhs", "toutiao", "douyin", "bilibili")
+TargetPlatform = Literal["xhs", "toutiao", "douyin", "bilibili"]
+
 
 class ProjectStatus(str, Enum):
+    queued = "queued"
     created = "created"
     ingesting = "ingesting"
     transcribing = "transcribing"
@@ -14,15 +18,20 @@ class ProjectStatus(str, Enum):
     analysis_completed = "analysis_completed"
     writing_xhs = "writing_xhs"
     producing_article = "producing_article"
+    validating_content = "validating_content"
     xhs_completed = "xhs_completed"
     toutiao_completed = "toutiao_completed"
+    douyin_completed = "douyin_completed"
+    bilibili_completed = "bilibili_completed"
     rendering_cards = "rendering_cards"
     completed = "completed"
+    stopped = "stopped"
     failed = "failed"
 
 
 class ProjectCreate(BaseModel):
     url: HttpUrl
+    target_platform: TargetPlatform = "xhs"
     language: str = Field(default="zh", min_length=2, max_length=16)
     style: str = Field(default="干货", max_length=32)
     use_whisper: bool = True
@@ -34,6 +43,7 @@ class ProjectCreate(BaseModel):
 class ProjectCreated(BaseModel):
     project_id: str
     status: ProjectStatus
+    target_platform: TargetPlatform
 
 
 class ProjectProduceRequest(BaseModel):
@@ -59,6 +69,7 @@ class ProgressLog(BaseModel):
 class ProjectRecord(BaseModel):
     project_id: str
     url: str
+    target_platform: TargetPlatform = "xhs"
     language: str
     style: str
     use_whisper: bool
@@ -98,6 +109,7 @@ class LLMSettingsUpdate(BaseModel):
     max_tokens: Optional[int] = Field(default=None, ge=1, le=64000)
     timeout_ms: Optional[int] = Field(default=None, ge=1000, le=600000)
     max_chars: Optional[int] = Field(default=None, ge=1000, le=2000000)
+    retry_attempts: Optional[int] = Field(default=None, ge=1, le=10)
 
 
 class ImageSettingsUpdate(BaseModel):
@@ -118,12 +130,24 @@ FILE_KIND_TO_PATH = {
     "content_assets": "analysis/content-assets.json",
     "xhs_post_json": "analysis/xiaohongshu-post.json",
     "xhs_post_md": "analysis/xhs-post.md",
+    "xhs_post_docx": "analysis/xhs-article.docx",
+    "xhs_quality_report": "analysis/xhs-quality-report.json",
     "image_prompts": "analysis/image-prompts.json",
     "image_cards": "analysis/image-cards.json",
     "toutiao_post_json": "analysis/toutiao-post.json",
     "toutiao_post_md": "analysis/toutiao-post.md",
+    "toutiao_post_docx": "analysis/toutiao-article.docx",
+    "toutiao_quality_report": "analysis/toutiao-quality-report.json",
     "toutiao_image_prompts": "analysis/toutiao-image-prompts.json",
     "toutiao_image_cards": "analysis/toutiao-image-cards.json",
+    "douyin_post_json": "analysis/douyin-post.json",
+    "douyin_post_md": "analysis/douyin-post.md",
+    "douyin_post_docx": "analysis/douyin-article.docx",
+    "douyin_quality_report": "analysis/douyin-quality-report.json",
+    "bilibili_post_json": "analysis/bilibili-post.json",
+    "bilibili_post_md": "analysis/bilibili-post.md",
+    "bilibili_post_docx": "analysis/bilibili-article.docx",
+    "bilibili_quality_report": "analysis/bilibili-quality-report.json",
     "asset_package": "analysis/asset-package.json",
     "run_metadata": "analysis/run-metadata.json",
 }

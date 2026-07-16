@@ -19,6 +19,7 @@ def test_extract_keyframes_writes_skipped_payload_for_transcript_only_run(tmp_pa
     )
 
     assert payload["skipped"] is True
+    assert payload["analysis_mode"] == "transcript_only"
     assert payload["frame_count"] == 0
     assert payload["keyframes"] == []
     assert read_json(paths.analysis_dir / "keyframes.json")["skip_reason"]

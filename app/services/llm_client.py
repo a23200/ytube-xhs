@@ -45,6 +45,7 @@ class LLMClient:
         self.timeout = settings.llm_timeout_ms / 1000.0
         self.max_chars = settings.llm_max_chars
         self.max_tokens = settings.llm_max_tokens
+        self.retry_attempts = settings.llm_retry_attempts
 
     def ensure_available(self, step: str) -> None:
         if self.requires_api_key and not self.api_key:
@@ -74,7 +75,7 @@ class LLMClient:
         step: str,
         temperature: float = 0.3,
         force_json: bool = False,
-        attempts: int = 3,
+        attempts: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
@@ -94,12 +95,15 @@ class LLMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        last_error: Optional[str] = None
+        configured_attempts = self.retry_attempts if attempts is None else attempts
+        attempt_limit = max(1, int(configured_attempts))
+        last_failure: Dict[str, Any] = {}
         request_timeout = timeout_seconds if timeout_seconds is not None else self.timeout
-        for attempt in range(max(1, attempts)):
+        endpoint = f"{self.base_url}/chat/completions"
+        for attempt in range(attempt_limit):
             try:
                 response = httpx.post(
-                    f"{self.base_url}/chat/completions",
+                    endpoint,
                     headers=headers,
                     json=payload,
                     timeout=request_timeout,
@@ -107,23 +111,131 @@ class LLMClient:
                 if response.status_code >= 400 and force_json and "response_format" in payload:
                     payload.pop("response_format", None)
                     response = httpx.post(
-                        f"{self.base_url}/chat/completions",
+                        endpoint,
                         headers=headers,
                         json=payload,
                         timeout=request_timeout,
                     )
                 response.raise_for_status()
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
+                try:
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"]
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    raise PipelineError(
+                        code="llm_response_invalid",
+                        message="LLM returned a successful HTTP response with an invalid chat completion payload.",
+                        step=step,
+                        details=self._failure_details(
+                            attempt_limit=attempt_limit,
+                            attempts_made=attempt + 1,
+                            timeout_seconds=request_timeout,
+                            response=response,
+                            error=exc,
+                        ),
+                    ) from exc
+                if not isinstance(content, str) or not content.strip():
+                    raise PipelineError(
+                        code="llm_response_invalid",
+                        message="LLM returned an empty chat completion.",
+                        step=step,
+                        details=self._failure_details(
+                            attempt_limit=attempt_limit,
+                            attempts_made=attempt + 1,
+                            timeout_seconds=request_timeout,
+                            response=response,
+                            error=ValueError("empty completion content"),
+                        ),
+                    )
+                return content
+            except PipelineError:
+                raise
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                last_failure = self._failure_details(
+                    attempt_limit=attempt_limit,
+                    attempts_made=attempt + 1,
+                    timeout_seconds=request_timeout,
+                    response=exc.response,
+                    error=exc,
+                )
+                if status_code in {401, 403}:
+                    raise PipelineError(
+                        code="llm_authentication_failed",
+                        message="LLM rejected the configured API credentials or account access.",
+                        step=step,
+                        details=last_failure,
+                    ) from exc
+                if status_code == 429 and attempt + 1 >= attempt_limit:
+                    raise PipelineError(
+                        code="llm_rate_limited",
+                        message="LLM rate limit was still active after the configured retries.",
+                        step=step,
+                        details=last_failure,
+                    ) from exc
+                if status_code == 408 and attempt + 1 >= attempt_limit:
+                    raise PipelineError(
+                        code="llm_timeout",
+                        message="LLM returned HTTP 408 after the configured retries.",
+                        step=step,
+                        details=last_failure,
+                    ) from exc
+                if status_code not in {408, 409, 425, 429} and status_code < 500:
+                    raise PipelineError(
+                        code="llm_http_error",
+                        message="LLM rejected the chat completion request.",
+                        step=step,
+                        details=last_failure,
+                    ) from exc
+                if attempt + 1 >= attempt_limit:
+                    raise PipelineError(
+                        code="llm_http_error",
+                        message="LLM endpoint returned an HTTP error after retries.",
+                        step=step,
+                        details=last_failure,
+                    ) from exc
+            except httpx.TimeoutException as exc:
+                last_failure = self._failure_details(
+                    attempt_limit=attempt_limit,
+                    attempts_made=attempt + 1,
+                    timeout_seconds=request_timeout,
+                    error=exc,
+                )
+                if attempt + 1 >= attempt_limit:
+                    raise PipelineError(
+                        code="llm_timeout",
+                        message="LLM did not respond before the configured timeout after retries.",
+                        step=step,
+                        details=last_failure,
+                    ) from exc
+            except httpx.RequestError as exc:
+                last_failure = self._failure_details(
+                    attempt_limit=attempt_limit,
+                    attempts_made=attempt + 1,
+                    timeout_seconds=request_timeout,
+                    error=exc,
+                )
+                if attempt + 1 >= attempt_limit:
+                    raise PipelineError(
+                        code="llm_network_error",
+                        message="LLM endpoint could not be reached after retries.",
+                        step=step,
+                        details=last_failure,
+                    ) from exc
             except Exception as exc:
-                last_error = self._sanitize_error(str(exc))
+                last_failure = self._failure_details(
+                    attempt_limit=attempt_limit,
+                    attempts_made=attempt + 1,
+                    timeout_seconds=request_timeout,
+                    error=exc,
+                )
+            if attempt + 1 < attempt_limit:
                 time.sleep(0.8 * (attempt + 1))
 
         raise PipelineError(
             code="llm_request_failed",
             message="OpenAI-compatible chat completion request failed after retries.",
             step=step,
-            details={"error": last_error, "base_url": self.safe_base_url, "model": self.model},
+            details=last_failure,
         )
 
     def json_chat(
@@ -131,7 +243,7 @@ class LLMClient:
         messages: List[Dict[str, str]],
         step: str,
         temperature: float = 0.2,
-        attempts: int = 3,
+        attempts: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -286,6 +398,39 @@ class LLMClient:
             message = message.replace(self.api_key, "[redacted]")
         message = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", message)
         return SENSITIVE_QUERY_RE.sub(r"\1[redacted]", message)
+
+    def _response_excerpt(self, response: Any, limit: int = 1200) -> str:
+        try:
+            text = str(response.text or "")
+        except Exception:
+            text = ""
+        return self._safe_error_excerpt(text, limit=limit)
+
+    def _failure_details(
+        self,
+        *,
+        attempt_limit: int,
+        attempts_made: int,
+        timeout_seconds: float,
+        error: Exception,
+        response: Any = None,
+    ) -> Dict[str, Any]:
+        status_code = getattr(response, "status_code", None)
+        details: Dict[str, Any] = {
+            "error_type": type(error).__name__,
+            "error": self._sanitize_error(str(error)),
+            "base_url": self.safe_base_url,
+            "model": self.model,
+            "attempts_made": attempts_made,
+            "attempt_limit": attempt_limit,
+            "timeout_seconds": timeout_seconds,
+        }
+        if status_code is not None:
+            details["http_status"] = int(status_code)
+        excerpt = self._response_excerpt(response) if response is not None else ""
+        if excerpt:
+            details["response_excerpt"] = excerpt
+        return details
 
     def _safe_error_excerpt(self, value: str, limit: int = 2000) -> str:
         return self._sanitize_error(str(value)[:limit])

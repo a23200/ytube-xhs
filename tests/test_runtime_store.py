@@ -223,14 +223,14 @@ def test_project_store_cancel_running_project_releases_status_and_blocks_late_wr
 
     cancelled = store.cancel(record.project_id)
 
-    assert cancelled.status == ProjectStatus.failed
+    assert cancelled.status == ProjectStatus.stopped
     assert cancelled.error["code"] == "user_stopped"
     assert cancelled.error["details"]["previous_status"] == "ingesting"
     assert paths.cancel_file().exists()
     assert store.can_cancel(record.project_id) is False
 
     late = store.set_status(record.project_id, ProjectStatus.transcribing, "late write")
-    assert late.status == ProjectStatus.failed
+    assert late.status == ProjectStatus.stopped
     assert late.error["code"] == "user_stopped"
 
     write_json(paths.source_dir / "metadata.json", {"video_id": "v1"})
@@ -262,7 +262,7 @@ def test_project_store_retry_clears_cancel_marker_when_inputs_ready(tmp_path: Pa
 
     assert started is True
     assert missing == []
-    assert queued.status == ProjectStatus.producing_article
+    assert queued.status == ProjectStatus.queued
     assert queued.error is None
     assert not paths.cancel_file().exists()
 

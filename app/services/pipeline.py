@@ -7,36 +7,38 @@ from app.services.frame_extractor import extract_keyframes, write_skipped_keyfra
 from app.services.image_card_renderer import render_image_cards
 from app.services.image_prompt_writer import write_image_prompts
 from app.services.ingest import ingest_video
+from app.services.platforms import get_platform, platform_values
 from app.services.report_writer import write_analysis_asset_package, write_partial_asset_package, write_reports
-from app.services.runtime_store import read_json, store, write_json
+from app.services.runtime_store import FILE_KIND_TO_PATH, read_json, store, write_json
 from app.services.transcript import build_transcript
 from app.services.visual_analyzer import analyze_visuals
-from app.services.xhs_writer import write_toutiao_post, write_xhs_post
+from app.services.xhs_writer import write_platform_post
 
 DOWNSTREAM_OUTPUT_KINDS = [
     "content_assets",
-    "xhs_post_json",
-    "xhs_post_md",
-    "image_prompts",
-    "image_cards",
-    "toutiao_post_json",
-    "toutiao_post_md",
-    "toutiao_image_prompts",
-    "toutiao_image_cards",
+    *[kind for adapter in platform_values() for kind in adapter.output_kinds()],
     "asset_package",
 ]
-PRODUCE_OUTPUT_KINDS = ["xhs_post_json", "xhs_post_md", "image_prompts", "image_cards", "asset_package"]
+PRODUCE_OUTPUT_KINDS = [*get_platform("xhs").output_kinds(), "asset_package"]
 IMAGE_GENERATION_OUTPUT_KINDS = ["image_cards", "asset_package"]
 TOUTIAO_PRODUCE_OUTPUT_KINDS = [
-    "toutiao_post_json",
-    "toutiao_post_md",
-    "toutiao_image_prompts",
-    "toutiao_image_cards",
+    *get_platform("toutiao").output_kinds(),
     "asset_package",
 ]
 TOUTIAO_IMAGE_GENERATION_OUTPUT_KINDS = ["toutiao_image_cards", "asset_package"]
 VISUAL_AND_DOWNSTREAM_OUTPUT_KINDS = ["visual_analysis", *DOWNSTREAM_OUTPUT_KINDS]
-ANALYZE_LLM_FALLBACK_CODES = {"llm_unavailable", "missing_dependency", "llm_request_failed", "llm_json_parse_failed"}
+ANALYZE_LLM_FALLBACK_CODES = {
+    "llm_unavailable",
+    "missing_dependency",
+    "llm_authentication_failed",
+    "llm_rate_limited",
+    "llm_timeout",
+    "llm_network_error",
+    "llm_http_error",
+    "llm_response_invalid",
+    "llm_request_failed",
+    "llm_json_parse_failed",
+}
 TEXT_ONLY_SKIP_REASON = (
     "Text-only analysis mode enabled; skipped keyframe extraction, OCR, screenshots, and image-card generation."
 )
@@ -50,13 +52,19 @@ def _text_only_prompt_placeholder() -> Dict[str, Any]:
     }
 
 
-def _tag_text_only_assets(record: Any, assets: Dict[str, Any], paths: Any) -> Dict[str, Any]:
-    if not getattr(record, "text_only", False):
-        return assets
+def _tag_analysis_assets(
+    record: Any,
+    assets: Dict[str, Any],
+    keyframes: Dict[str, Any],
+    paths: Any,
+) -> Dict[str, Any]:
     tagged = dict(assets)
-    tagged["analysis_mode"] = "text_only"
-    tagged["requested_outputs"] = ["article"]
-    tagged["skipped_outputs"] = ["keyframes", "ocr", "screenshots", "image_prompts", "image_cards"]
+    tagged["target_platform"] = record.target_platform
+    tagged["source_analysis_mode"] = keyframes.get("analysis_mode") or "full"
+    if getattr(record, "text_only", False):
+        tagged["analysis_mode"] = "text_only"
+        tagged["requested_outputs"] = ["article"]
+        tagged["skipped_outputs"] = ["keyframes", "ocr", "screenshots", "image_prompts", "image_cards"]
     write_json(paths.analysis_dir / "content-assets.json", tagged)
     return tagged
 
@@ -132,23 +140,7 @@ def _pipeline_cancelled(project_id: str) -> bool:
 
 def _register_standard_outputs(project_id: str) -> None:
     paths = store.paths(project_id)
-    output_paths = {
-        "metadata": paths.source_dir / "metadata.json",
-        "transcript": paths.transcript_dir / "transcript.json",
-        "keyframes": paths.analysis_dir / "keyframes.json",
-        "visual_analysis": paths.analysis_dir / "visual-analysis.json",
-        "content_assets": paths.analysis_dir / "content-assets.json",
-        "xhs_post_json": paths.analysis_dir / "xiaohongshu-post.json",
-        "xhs_post_md": paths.analysis_dir / "xhs-post.md",
-        "image_prompts": paths.analysis_dir / "image-prompts.json",
-        "image_cards": paths.analysis_dir / "image-cards.json",
-        "toutiao_post_json": paths.analysis_dir / "toutiao-post.json",
-        "toutiao_post_md": paths.analysis_dir / "toutiao-post.md",
-        "toutiao_image_prompts": paths.analysis_dir / "toutiao-image-prompts.json",
-        "toutiao_image_cards": paths.analysis_dir / "toutiao-image-cards.json",
-        "asset_package": paths.analysis_dir / "asset-package.json",
-        "run_metadata": paths.analysis_dir / "run-metadata.json",
-    }
+    output_paths = {kind: paths.project_dir / relative for kind, relative in FILE_KIND_TO_PATH.items()}
     for kind, path in output_paths.items():
         if path.exists():
             store.add_output(project_id, kind, path)
@@ -156,55 +148,32 @@ def _register_standard_outputs(project_id: str) -> None:
 
 def _clear_downstream_outputs(project_id: str) -> None:
     paths = store.paths(project_id)
-    stale_files = [
-        paths.analysis_dir / "content-assets.json",
-        paths.analysis_dir / "xiaohongshu-post.json",
-        paths.analysis_dir / "xhs-post.md",
-        paths.analysis_dir / "image-prompts.json",
-        paths.analysis_dir / "image-cards.json",
-        paths.analysis_dir / "toutiao-post.json",
-        paths.analysis_dir / "toutiao-post.md",
-        paths.analysis_dir / "toutiao-image-prompts.json",
-        paths.analysis_dir / "toutiao-image-cards.json",
-        paths.analysis_dir / "asset-package.json",
-    ]
+    stale_files = [paths.project_dir / FILE_KIND_TO_PATH[kind] for kind in DOWNSTREAM_OUTPUT_KINDS if kind in FILE_KIND_TO_PATH]
     for path in stale_files:
         path.unlink(missing_ok=True)
     store.clear_outputs(project_id, DOWNSTREAM_OUTPUT_KINDS)
 
 
 def _clear_produce_outputs(project_id: str) -> None:
-    paths = store.paths(project_id)
-    stale_files = [
-        paths.analysis_dir / "xiaohongshu-post.json",
-        paths.analysis_dir / "xhs-post.md",
-        paths.analysis_dir / "image-prompts.json",
-        paths.analysis_dir / "image-cards.json",
-        paths.analysis_dir / "asset-package.json",
-    ]
-    for path in stale_files:
-        path.unlink(missing_ok=True)
-    if paths.cards_dir.exists():
-        for path in paths.cards_dir.glob("*.png"):
-            path.unlink(missing_ok=True)
-    store.clear_outputs(project_id, PRODUCE_OUTPUT_KINDS)
+    _clear_platform_produce_outputs(project_id, "xhs")
 
 
 def _clear_toutiao_produce_outputs(project_id: str) -> None:
+    _clear_platform_produce_outputs(project_id, "toutiao")
+
+
+def _clear_platform_produce_outputs(project_id: str, platform: str) -> None:
     paths = store.paths(project_id)
-    stale_files = [
-        paths.analysis_dir / "toutiao-post.json",
-        paths.analysis_dir / "toutiao-post.md",
-        paths.analysis_dir / "toutiao-image-prompts.json",
-        paths.analysis_dir / "toutiao-image-cards.json",
-        paths.analysis_dir / "asset-package.json",
-    ]
+    adapter = get_platform(platform)
+    kinds = [*adapter.output_kinds(), "asset_package"]
+    stale_files = [paths.project_dir / FILE_KIND_TO_PATH[kind] for kind in kinds]
     for path in stale_files:
         path.unlink(missing_ok=True)
-    if paths.toutiao_cards_dir.exists():
-        for path in paths.toutiao_cards_dir.glob("*.png"):
+    cards_dir = paths.toutiao_cards_dir if platform == "toutiao" else paths.cards_dir
+    if adapter.supports_images and cards_dir.exists():
+        for path in cards_dir.glob("*.png"):
             path.unlink(missing_ok=True)
-    store.clear_outputs(project_id, TOUTIAO_PRODUCE_OUTPUT_KINDS)
+    store.clear_outputs(project_id, kinds)
 
 
 def _clear_image_generation_outputs(project_id: str) -> None:
@@ -237,22 +206,123 @@ def _clear_toutiao_image_generation_outputs(project_id: str) -> None:
 
 def _clear_visual_and_downstream_outputs(project_id: str) -> None:
     paths = store.paths(project_id)
-    stale_files = [
-        paths.analysis_dir / "visual-analysis.json",
-        paths.analysis_dir / "content-assets.json",
-        paths.analysis_dir / "xiaohongshu-post.json",
-        paths.analysis_dir / "xhs-post.md",
-        paths.analysis_dir / "image-prompts.json",
-        paths.analysis_dir / "image-cards.json",
-        paths.analysis_dir / "toutiao-post.json",
-        paths.analysis_dir / "toutiao-post.md",
-        paths.analysis_dir / "toutiao-image-prompts.json",
-        paths.analysis_dir / "toutiao-image-cards.json",
-        paths.analysis_dir / "asset-package.json",
-    ]
-    for path in stale_files:
-        path.unlink(missing_ok=True)
-    store.clear_outputs(project_id, VISUAL_AND_DOWNSTREAM_OUTPUT_KINDS)
+    (paths.analysis_dir / "visual-analysis.json").unlink(missing_ok=True)
+    store.clear_outputs(project_id, ["visual_analysis"])
+    _clear_downstream_outputs(project_id)
+    for cards_dir in (paths.cards_dir, paths.toutiao_cards_dir):
+        for path in cards_dir.glob("*.png"):
+            path.unlink(missing_ok=True)
+
+
+def _write_platform_outputs(
+    project_id: str,
+    record: Any,
+    metadata: Dict[str, Any],
+    transcript: Dict[str, Any],
+    keyframes: Dict[str, Any],
+    visual: Dict[str, Any],
+    assets: Dict[str, Any],
+    paths: Any,
+    *,
+    render_images: bool,
+    source_label: str,
+) -> None:
+    adapter = get_platform(record.target_platform)
+    store.set_status(
+        project_id,
+        ProjectStatus.producing_article,
+        f"Generating {adapter.name} article {source_label}.",
+        {"platform": adapter.key},
+    )
+
+    def on_validation(report: Dict[str, Any]) -> None:
+        store.set_status(
+            project_id,
+            ProjectStatus.validating_content,
+            f"Validating {adapter.name} article structure, grounding, and rewrite degree.",
+            {
+                "platform": adapter.key,
+                "rewrite_count": report.get("rewrite_count", 0),
+                "violations": [item.get("code") for item in report.get("violations", [])],
+            },
+        )
+
+    post = write_platform_post(
+        metadata,
+        assets,
+        keyframes,
+        visual,
+        record.style,
+        paths,
+        platform=adapter.key,
+        transcript_payload=transcript,
+        on_validation=on_validation,
+    )
+    store.add_output(project_id, adapter.post_json_kind, paths.analysis_dir / adapter.post_filename)
+    store.add_output(project_id, adapter.quality_kind, paths.analysis_dir / adapter.quality_filename)
+
+    images_allowed = not record.text_only and adapter.supports_images
+    if images_allowed:
+        prompts = write_image_prompts(post, keyframes, visual, paths, platform=adapter.key)
+        store.add_output(project_id, adapter.image_prompts_kind, paths.analysis_dir / adapter.image_prompts_filename)
+    else:
+        prompts = _text_only_prompt_placeholder()
+
+    image_cards: Dict[str, Any] = {}
+    if render_images and images_allowed:
+        store.set_status(
+            project_id,
+            ProjectStatus.rendering_cards,
+            f"Rendering {adapter.name} image cards.",
+            {"platform": adapter.key},
+        )
+        renderer_kwargs: Dict[str, Any] = {}
+        if adapter.key == "toutiao":
+            renderer_kwargs = {
+                "platform": adapter.key,
+                "output_filename": adapter.image_cards_filename,
+                "cards_dir": paths.toutiao_cards_dir,
+            }
+        image_cards = render_image_cards(
+            metadata,
+            assets,
+            post,
+            keyframes,
+            prompts,
+            paths,
+            **renderer_kwargs,
+        )
+        store.add_output(project_id, adapter.image_cards_kind, paths.analysis_dir / adapter.image_cards_filename)
+
+    write_reports(
+        metadata,
+        transcript,
+        keyframes,
+        visual,
+        assets,
+        post,
+        prompts,
+        paths,
+        store.get(project_id).warnings,
+        image_cards=image_cards,
+        platform=adapter.key,
+    )
+    _register_standard_outputs(project_id)
+    if render_images and images_allowed:
+        store.set_status(
+            project_id,
+            ProjectStatus.completed,
+            f"{adapter.name} article and image cards completed.",
+            {"platform": adapter.key},
+        )
+    else:
+        image_note = " Image generation is disabled." if not images_allowed else " Image generation can be run next."
+        store.set_status(
+            project_id,
+            adapter.completed_status,
+            f"{adapter.name} article completed.{image_note}",
+            {"platform": adapter.key},
+        )
 
 
 def run_project_pipeline(project_id: str) -> None:
@@ -282,32 +352,21 @@ def run_project_pipeline(project_id: str) -> None:
 
         store.set_status(project_id, ProjectStatus.planning_content, "Generating structured content assets with LLM.")
         assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
-        assets = _tag_text_only_assets(record, assets, paths)
+        assets = _tag_analysis_assets(record, assets, keyframes, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         store.log(project_id, ProjectStatus.planning_content, "Content assets completed.")
-
-        store.set_status(
+        _write_platform_outputs(
             project_id,
-            ProjectStatus.writing_xhs,
-            "Writing text-only Xiaohongshu article." if record.text_only else "Writing Xiaohongshu post and image prompts.",
+            record,
+            metadata,
+            transcript,
+            keyframes,
+            visual,
+            assets,
+            paths,
+            render_images=True,
+            source_label="from the completed analysis",
         )
-        post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
-        if record.text_only:
-            prompts = _text_only_prompt_placeholder()
-            warnings = store.get(project_id).warnings
-            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
-            _register_standard_outputs(project_id)
-            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only XHS article completed. Image generation is disabled.")
-            return
-
-        prompts = write_image_prompts(post, keyframes, visual, paths)
-        store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards.")
-        render_image_cards(metadata, assets, post, keyframes, prompts, paths)
-        warnings = store.get(project_id).warnings
-        image_cards = read_json(paths.analysis_dir / "image-cards.json")
-        write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
-        _register_standard_outputs(project_id)
-        store.set_status(project_id, ProjectStatus.completed, "Pipeline completed.")
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return
@@ -356,32 +415,21 @@ def run_project_downstream_pipeline(project_id: str) -> None:
 
         store.set_status(project_id, ProjectStatus.planning_content, "Rerunning content planning from existing artifacts.")
         assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
-        assets = _tag_text_only_assets(record, assets, paths)
+        assets = _tag_analysis_assets(record, assets, keyframes, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         store.log(project_id, ProjectStatus.planning_content, "Content assets completed from existing artifacts.")
-
-        store.set_status(
+        _write_platform_outputs(
             project_id,
-            ProjectStatus.writing_xhs,
-            "Rerunning text-only Xiaohongshu article." if record.text_only else "Rerunning Xiaohongshu post and image prompts.",
+            record,
+            metadata,
+            transcript,
+            keyframes,
+            visual,
+            assets,
+            paths,
+            render_images=True,
+            source_label="from the downstream rerun",
         )
-        post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
-        if record.text_only:
-            prompts = _text_only_prompt_placeholder()
-            warnings = store.get(project_id).warnings
-            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
-        else:
-            prompts = write_image_prompts(post, keyframes, visual, paths)
-            store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards from rerun.")
-            render_image_cards(metadata, assets, post, keyframes, prompts, paths)
-            warnings = store.get(project_id).warnings
-            image_cards = read_json(paths.analysis_dir / "image-cards.json")
-            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
-        _register_standard_outputs(project_id)
-        if record.text_only:
-            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only downstream rerun completed. Image generation is disabled.")
-        else:
-            store.set_status(project_id, ProjectStatus.completed, "Downstream rerun completed.")
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return
@@ -441,28 +489,21 @@ def run_project_visual_pipeline(project_id: str) -> None:
 
         store.set_status(project_id, ProjectStatus.planning_content, "Generating structured content assets with refreshed visuals.")
         assets = build_content_assets(metadata, transcript, keyframes, visual, record.language, record.style, paths)
-        assets = _tag_text_only_assets(record, assets, paths)
+        assets = _tag_analysis_assets(record, assets, keyframes, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         store.log(project_id, ProjectStatus.planning_content, "Content assets completed from refreshed visuals.")
-
-        store.set_status(project_id, ProjectStatus.writing_xhs, "Writing Xiaohongshu post and image prompts from refreshed visuals.")
-        post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
-        if record.text_only:
-            prompts = _text_only_prompt_placeholder()
-            warnings = store.get(project_id).warnings
-            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
-        else:
-            prompts = write_image_prompts(post, keyframes, visual, paths)
-            store.set_status(project_id, ProjectStatus.rendering_cards, "Rendering Xiaohongshu image cards from refreshed visuals.")
-            render_image_cards(metadata, assets, post, keyframes, prompts, paths)
-            warnings = store.get(project_id).warnings
-            image_cards = read_json(paths.analysis_dir / "image-cards.json")
-            write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards=image_cards)
-        _register_standard_outputs(project_id)
-        if record.text_only:
-            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only visual/downstream rerun completed. Image generation is disabled.")
-        else:
-            store.set_status(project_id, ProjectStatus.completed, "Visual and downstream rerun completed.")
+        _write_platform_outputs(
+            project_id,
+            record,
+            metadata,
+            transcript,
+            keyframes,
+            visual,
+            assets,
+            paths,
+            render_images=True,
+            source_label="from refreshed visual analysis",
+        )
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return
@@ -533,14 +574,14 @@ def run_project_analysis_pipeline(project_id: str) -> None:
                 paths,
                 fallback_reason=exc.message,
             )
-        assets = _tag_text_only_assets(record, assets, paths)
+        assets = _tag_analysis_assets(record, assets, keyframes, paths)
         store.add_output(project_id, "content_assets", paths.analysis_dir / "content-assets.json")
         write_analysis_asset_package(metadata, transcript, keyframes, visual, assets, paths, store.get(project_id).warnings)
         _register_standard_outputs(project_id)
         completion_message = (
             "Text-only analysis completed. Review or edit content assets before producing an article."
             if record.text_only
-            else "Analysis completed. Review or edit content assets before producing XHS cards."
+            else f"Analysis completed. Review or edit content assets before producing {get_platform(record.target_platform).name} content."
         )
         store.set_status(project_id, ProjectStatus.analysis_completed, completion_message)
     except PipelineError as exc:
@@ -564,75 +605,19 @@ def run_project_analysis_pipeline(project_id: str) -> None:
 
 
 def run_project_produce_pipeline(project_id: str) -> None:
-    record = store.get(project_id)
-    paths = store.paths(project_id)
-    try:
-        _clear_produce_outputs(project_id)
-        required_files = {
-            "metadata": paths.source_dir / "metadata.json",
-            "transcript": paths.transcript_dir / "transcript.json",
-            "keyframes": paths.analysis_dir / "keyframes.json",
-            "visual_analysis": paths.analysis_dir / "visual-analysis.json",
-            "content_assets": paths.analysis_dir / "content-assets.json",
-        }
-        missing = [name for name, path in required_files.items() if not path.exists()]
-        if missing:
-            raise PipelineError(
-                code="produce_artifacts_missing",
-                message="Cannot produce XHS article and cards because Analyze artifacts are missing.",
-                step="producing_article",
-                details={"missing": missing},
-            )
-
-        metadata = read_json(required_files["metadata"])
-        transcript = read_json(required_files["transcript"])
-        keyframes = read_json(required_files["keyframes"])
-        visual = read_json(required_files["visual_analysis"])
-        assets = read_json(required_files["content_assets"])
-        _register_standard_outputs(project_id)
-
-        store.set_status(project_id, ProjectStatus.producing_article, "Generating Xiaohongshu post from reviewed analysis assets.", {"platform": "xhs"})
-        post = write_xhs_post(metadata, assets, keyframes, visual, record.style, paths)
-        store.add_output(project_id, "xhs_post_json", paths.analysis_dir / "xiaohongshu-post.json")
-
-        if record.text_only:
-            prompts = _text_only_prompt_placeholder()
-        else:
-            prompts = write_image_prompts(post, keyframes, visual, paths)
-            store.add_output(project_id, "image_prompts", paths.analysis_dir / "image-prompts.json")
-
-        warnings = store.get(project_id).warnings
-        write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={})
-        _register_standard_outputs(project_id)
-        if record.text_only:
-            store.set_status(project_id, ProjectStatus.xhs_completed, "Text-only XHS article completed. Image generation is disabled.", {"platform": "xhs"})
-        else:
-            store.set_status(project_id, ProjectStatus.xhs_completed, "XHS article completed. Image generation can be run next.", {"platform": "xhs"})
-    except PipelineError as exc:
-        if _pipeline_cancelled(project_id):
-            return
-        write_partial_asset_package(paths, exc.to_dict(), store.get(project_id).warnings)
-        _register_standard_outputs(project_id)
-        store.fail(project_id, exc.to_dict())
-    except Exception as exc:
-        error: Dict[str, Any] = {
-            "code": "unexpected_error",
-            "message": str(exc),
-            "step": store.get(project_id).status,
-            "details": {"type": type(exc).__name__},
-        }
-        if _pipeline_cancelled(project_id):
-            return
-        write_partial_asset_package(paths, error, store.get(project_id).warnings)
-        _register_standard_outputs(project_id)
-        store.fail(project_id, error)
+    run_project_platform_produce_pipeline(project_id, "xhs")
 
 
 def run_project_toutiao_produce_pipeline(project_id: str) -> None:
+    run_project_platform_produce_pipeline(project_id, "toutiao")
+
+
+def run_project_platform_produce_pipeline(project_id: str, platform: str) -> None:
     record = store.get(project_id)
     paths = store.paths(project_id)
+    adapter = get_platform(platform)
     try:
-        _clear_toutiao_produce_outputs(project_id)
+        _clear_platform_produce_outputs(project_id, adapter.key)
         required_files = {
             "metadata": paths.source_dir / "metadata.json",
             "transcript": paths.transcript_dir / "transcript.json",
@@ -644,9 +629,9 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
         if missing:
             raise PipelineError(
                 code="produce_artifacts_missing",
-                message="Cannot produce Toutiao article and cards because Analyze artifacts are missing.",
+                message=f"Cannot produce {adapter.name} article because Analyze artifacts are missing.",
                 step="producing_article",
-                details={"missing": missing, "platform": "toutiao"},
+                details={"missing": missing, "platform": adapter.key},
             )
 
         metadata = read_json(required_files["metadata"])
@@ -655,24 +640,20 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
         visual = read_json(required_files["visual_analysis"])
         assets = read_json(required_files["content_assets"])
         _register_standard_outputs(project_id)
-
-        store.set_status(project_id, ProjectStatus.producing_article, "Generating Toutiao post from reviewed analysis assets.", {"platform": "toutiao"})
-        post = write_toutiao_post(metadata, assets, keyframes, visual, record.style, paths)
-        store.add_output(project_id, "toutiao_post_json", paths.analysis_dir / "toutiao-post.json")
-
-        if record.text_only:
-            prompts = _text_only_prompt_placeholder()
-        else:
-            prompts = write_image_prompts(post, keyframes, visual, paths, platform="toutiao")
-            store.add_output(project_id, "toutiao_image_prompts", paths.analysis_dir / "toutiao-image-prompts.json")
-
-        warnings = store.get(project_id).warnings
-        write_reports(metadata, transcript, keyframes, visual, assets, post, prompts, paths, warnings, image_cards={}, platform="toutiao")
-        _register_standard_outputs(project_id)
-        if record.text_only:
-            store.set_status(project_id, ProjectStatus.toutiao_completed, "Text-only Toutiao article completed. Image generation is disabled.", {"platform": "toutiao"})
-        else:
-            store.set_status(project_id, ProjectStatus.toutiao_completed, "Toutiao article completed. Image generation can be run next.", {"platform": "toutiao"})
+        if record.target_platform != adapter.key:
+            record = store.set_target_platform(project_id, adapter.key)
+        _write_platform_outputs(
+            project_id,
+            record,
+            metadata,
+            transcript,
+            keyframes,
+            visual,
+            assets,
+            paths,
+            render_images=False,
+            source_label="from reviewed analysis assets",
+        )
     except PipelineError as exc:
         if _pipeline_cancelled(project_id):
             return
@@ -684,7 +665,7 @@ def run_project_toutiao_produce_pipeline(project_id: str) -> None:
             "code": "unexpected_error",
             "message": str(exc),
             "step": store.get(project_id).status,
-            "details": {"type": type(exc).__name__, "platform": "toutiao"},
+            "details": {"type": type(exc).__name__, "platform": adapter.key},
         }
         if _pipeline_cancelled(project_id):
             return

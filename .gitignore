@@ -15,3 +15,5 @@ runtime/_self_tests/
 dist/
 # Tool caches
 .ruff_cache/
+.playwright-cli/
+output/
