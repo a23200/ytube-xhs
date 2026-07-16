@@ -80,8 +80,11 @@ chmod +x "$BUILD_DIR/deploy/macos/"*.sh "$BUILD_DIR/scripts/"*.sh 2>/dev/null ||
 
 tar -C "$DIST_DIR" -czf "$ARCHIVE" "$PACKAGE_NAME"
 verify_archive
-shasum -a 256 "$ARCHIVE" > "$SHA_FILE"
-shasum -a 256 -c "$SHA_FILE"
+(
+  cd "$DIST_DIR"
+  shasum -a 256 "$(basename "$ARCHIVE")" > "$(basename "$SHA_FILE")"
+  shasum -a 256 -c "$(basename "$SHA_FILE")"
+)
 
 rm -rf "$BUILD_DIR"
 

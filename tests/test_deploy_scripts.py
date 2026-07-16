@@ -71,7 +71,8 @@ def test_macos_deploy_package_excludes_local_state_and_secrets(tmp_path):
         assert any(name.endswith("/PACKAGE-MANIFEST.txt") for name in names)
         digest, filename = checksum.read_text(encoding="utf-8").strip().split(maxsplit=1)
         assert digest == hashlib.sha256(archive.read_bytes()).hexdigest()
-        assert filename.lstrip("*").endswith(archive.name)
+        assert filename.lstrip("*") == archive.name
+        assert not Path(filename.lstrip("*")).is_absolute()
     finally:
         archive.unlink(missing_ok=True)
         checksum.unlink(missing_ok=True)
