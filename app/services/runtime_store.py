@@ -1,8 +1,12 @@
+import fcntl
 import json
+import os
 import re
 import shutil
+import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -100,7 +104,18 @@ def parse_time(value: str) -> datetime:
 
 def write_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -191,8 +206,24 @@ class ProjectStore:
     def __init__(self, runtime_dir: Optional[Path] = None) -> None:
         self.runtime_dir = runtime_dir or settings.runtime_dir
         self.projects_dir = self.runtime_dir / "projects"
+        self.locks_dir = self.runtime_dir / ".locks"
         self.projects_dir.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self.locks_dir.mkdir(parents=True, exist_ok=True)
+        self._locks_guard = threading.Lock()
+        self._project_locks: Dict[str, threading.RLock] = {}
+
+    @contextmanager
+    def _locked_project(self, project_id: str):
+        with self._locks_guard:
+            thread_lock = self._project_locks.setdefault(project_id, threading.RLock())
+        with thread_lock:
+            lock_path = self.locks_dir / f"{project_id}.lock"
+            with lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def paths(self, project_id: str) -> ProjectPaths:
         if not PROJECT_ID_RE.fullmatch(project_id):
@@ -251,8 +282,8 @@ class ProjectStore:
         return _record_from_payload(read_json(path))
 
     def delete(self, project_id: str) -> ProjectRecord:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             if not paths.status_file().exists():
                 raise FileNotFoundError(project_id)
             record = _record_from_payload(read_json(paths.status_file()))
@@ -272,8 +303,8 @@ class ProjectStore:
 
     def set_target_platform(self, project_id: str, platform: str) -> ProjectRecord:
         normalized = _normalize_target_platform(platform)
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             record.target_platform = normalized
             record.updated_at = utc_now()
@@ -340,8 +371,8 @@ class ProjectStore:
         paths.cancel_file().unlink(missing_ok=True)
 
     def cancel(self, project_id: str) -> ProjectRecord:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in RUNNING_STATUSES:
                 return record
@@ -380,8 +411,8 @@ class ProjectStore:
             return record
 
     def try_start_downstream_rerun(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in RERUN_READY_STATUSES:
                 return False, record, []
@@ -408,8 +439,8 @@ class ProjectStore:
         return self.try_start_platform_produce(project_id, platform="xhs")
 
     def try_start_platform_produce(self, project_id: str, platform: str = "xhs") -> Tuple[bool, ProjectRecord, List[str]]:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in PRODUCE_READY_STATUSES:
                 return False, record, []
@@ -435,8 +466,8 @@ class ProjectStore:
             return True, record, []
 
     def try_start_image_generation(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if record.text_only:
                 return False, record, []
@@ -463,8 +494,8 @@ class ProjectStore:
             return True, record, []
 
     def try_start_platform_image_generation(self, project_id: str, platform: str = "xhs") -> Tuple[bool, ProjectRecord, List[str]]:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if record.text_only:
                 return False, record, []
@@ -492,8 +523,8 @@ class ProjectStore:
             return True, record, []
 
     def try_start_visual_rerun(self, project_id: str) -> Tuple[bool, ProjectRecord, List[str]]:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if record.status not in RERUN_READY_STATUSES:
                 return False, record, []
@@ -524,8 +555,8 @@ class ProjectStore:
         details: Optional[Dict[str, Any]] = None,
         set_status: bool = False,
     ) -> ProjectRecord:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists() and status not in {ProjectStatus.failed, ProjectStatus.stopped}:
                 return record
@@ -547,8 +578,8 @@ class ProjectStore:
             return record
 
     def add_warning(self, project_id: str, warning: str) -> None:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
@@ -559,8 +590,8 @@ class ProjectStore:
             self._write_run_metadata(paths, record)
 
     def clear_outputs(self, project_id: str, kinds: Iterable[str]) -> None:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
@@ -571,8 +602,8 @@ class ProjectStore:
             self._write_run_metadata(paths, record)
 
     def clear_warnings(self, project_id: str) -> None:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
@@ -584,8 +615,9 @@ class ProjectStore:
     def mark_stale_running_failed(self, older_than_seconds: int, dry_run: bool = False) -> List[Dict[str, Any]]:
         recovered = []
         cutoff = datetime.now(timezone.utc).timestamp() - max(0, older_than_seconds)
-        with self._lock:
-            for status_file in sorted(self.projects_dir.glob("*/project.json")):
+        for status_file in sorted(self.projects_dir.glob("*/project.json")):
+            project_id = status_file.parent.name
+            with self._locked_project(project_id):
                 try:
                     paths = ProjectPaths(status_file.parent)
                     record = _record_from_payload(read_json(status_file))
@@ -660,7 +692,7 @@ class ProjectStore:
             raise ValueError(f"Output path for {kind} must be {FILE_KIND_TO_PATH[kind]}")
         if not output_path.exists():
             raise FileNotFoundError(path)
-        with self._lock:
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             if paths.cancel_file().exists():
                 return
@@ -670,8 +702,8 @@ class ProjectStore:
             self._write_run_metadata(paths, record)
 
     def fail(self, project_id: str, error: Dict[str, Any]) -> ProjectRecord:
-        with self._lock:
-            paths = self.paths(project_id)
+        paths = self.paths(project_id)
+        with self._locked_project(project_id):
             record = _record_from_payload(read_json(paths.status_file()))
             error = dict(error)
             details = dict(error.get("details") or {})

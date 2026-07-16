@@ -1,9 +1,18 @@
+import multiprocessing
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from app.schemas.models import ProjectCreate, ProjectStatus
 from app.services.runtime_store import ProjectStore, read_json, write_json
+
+
+def _append_project_logs(runtime_dir: str, project_id: str, prefix: str, count: int) -> None:
+    store = ProjectStore(Path(runtime_dir))
+    for index in range(count):
+        store.log(project_id, ProjectStatus.ingesting, f"{prefix}-{index}")
 
 
 def _write_registered_upstream(store: ProjectStore, project_id: str) -> None:
@@ -352,3 +361,51 @@ def test_project_store_rejects_unsafe_project_ids(tmp_path: Path):
     for project_id in ["../escape", "nested/project", "", "bad id"]:
         with pytest.raises(ValueError):
             store.paths(project_id)
+
+
+def test_project_store_cross_process_updates_are_atomic_and_lossless(tmp_path: Path):
+    store = ProjectStore(tmp_path)
+    record = store.create(ProjectCreate(url="https://example.com/video", max_frames=8))
+    context = multiprocessing.get_context("fork")
+    processes = [
+        context.Process(target=_append_project_logs, args=(str(tmp_path), record.project_id, prefix, 40))
+        for prefix in ("left", "right")
+    ]
+    for process in processes:
+        process.start()
+
+    read_errors = []
+    while any(process.is_alive() for process in processes):
+        try:
+            store.get(record.project_id)
+        except Exception as exc:  # pragma: no cover - the assertion below reports any transient parser failure
+            read_errors.append(exc)
+        time.sleep(0.001)
+    for process in processes:
+        process.join(timeout=2)
+        assert process.exitcode == 0
+
+    updated = store.get(record.project_id)
+    messages = {log.message for log in updated.logs}
+    assert read_errors == []
+    assert {f"left-{index}" for index in range(40)} <= messages
+    assert {f"right-{index}" for index in range(40)} <= messages
+    assert not list(store.paths(record.project_id).project_dir.rglob("*.tmp"))
+
+
+def test_project_store_locks_do_not_block_unrelated_projects(tmp_path: Path):
+    store = ProjectStore(tmp_path)
+    first = store.create(ProjectCreate(url="https://example.com/first", max_frames=8))
+    second = store.create(ProjectCreate(url="https://example.com/second", max_frames=8))
+    updated = threading.Event()
+
+    def update_second() -> None:
+        store.log(second.project_id, ProjectStatus.ingesting, "independent update")
+        updated.set()
+
+    with store._locked_project(first.project_id):
+        worker = threading.Thread(target=update_second)
+        worker.start()
+        assert updated.wait(timeout=0.5)
+    worker.join(timeout=1)
+    assert store.get(second.project_id).logs[-1].message == "independent update"
