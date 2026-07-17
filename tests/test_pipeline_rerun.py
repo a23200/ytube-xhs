@@ -139,13 +139,21 @@ class FakeLLMClient:
                         }
                     ]
                 }
+            system_content = messages[0]["content"]
+            target_chars = 850
+            if "今日头条" in system_content:
+                target_chars = 1300
+            elif "抖音" in system_content:
+                target_chars = 700
+            elif "哔哩哔哩" in system_content:
+                target_chars = 1100
             return {
                 "content_type": "清单",
                 "target_audience": ["目标用户"],
                 "titles": ["标题1", "标题2", "标题3", "标题4", "标题5"],
                 "cover_text": "封面文案",
                 "hook": "看似只是整理内容，结果真正拉开差距的，反而是先核对证据再下判断。",
-                "body": "这条内容可以整理成三个行动提醒，先看证据，再做判断，最后形成自己的表达。",
+                "body": "补充说明" * ((target_chars + 20) // 4) + "最后复核全文",
                 "image_plan": [
                     {
                         "page": 1,

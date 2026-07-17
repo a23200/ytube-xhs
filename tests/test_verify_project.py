@@ -8,6 +8,11 @@ from app.services.runtime_store import read_json, write_json
 from scripts.verify_project import verify_project
 
 
+def _valid_body_for_platform(platform: str) -> str:
+    adapter = get_platform(platform)
+    return "补充说明" * ((adapter.min_body_chars + 100) // 4) + "最后复核全文"
+
+
 def _write_valid_upstream_project(project: Path, status: str = "failed") -> None:
     video_path = project / "source/source.mp4"
     thumbnail_path = project / "source/thumbnail.jpg"
@@ -156,13 +161,14 @@ def _write_valid_downstream_outputs(project: Path) -> None:
         "recommended_content_type": "干货",
         "source_evidence": [{"claim": "观点", "source_type": "transcript", "time": 1.0, "source_text": "字幕文本"}],
     }
+    xhs_body = _valid_body_for_platform("xhs")
     xhs_post = {
         "content_type": "干货",
         "target_audience": ["目标用户"],
         "titles": ["标题1", "标题2", "标题3", "标题4", "标题5"],
         "cover_text": "封面文案",
         "hook": "开头",
-        "body": "正文",
+        "body": xhs_body,
         "image_plan": [
             {
                 "page": 1,
@@ -265,7 +271,7 @@ def _write_valid_downstream_outputs(project: Path) -> None:
                 "## 开头",
                 "开头",
                 "## 正文",
-                "正文",
+                xhs_body,
                 "## 配图规划",
                 "- 第 1 页｜cover｜封面｜来源：1s｜内容点：观点",
                 "## 图片提示词",
@@ -385,13 +391,14 @@ def _write_valid_text_article_project(project: Path, platform: str) -> None:
         "source_evidence": [{"claim": "证据需要核对", "source_type": "transcript", "time": 1.0, "source_text": "原始证据"}],
     }
     write_json(project / "analysis/content-assets.json", content_assets)
+    article_body = _valid_body_for_platform(platform)
     post = {
         "content_type": "原创文章",
         "target_audience": ["普通读者"],
         "titles": ["标题一", "标题二", "标题三", "标题四", "标题五"],
         "cover_text": "先别急着下结论",
         "hook": "看似只是省一步，结果最容易出错的，反而是这一步。",
-        "body": "很多人先给答案，再回头找证据。更稳妥的做法，是先核对来源，再把复杂内容讲成普通人听得懂的话。",
+        "body": article_body,
         "image_plan": [{"page": 1, "role": "cover", "caption": "先核对证据", "source_frame_time": None, "source_frame_path": None, "content_point": "核对来源"}],
         "hashtags": ["#内容创作"],
         "publish_suggestion": "发布前复核事实。",
@@ -430,7 +437,7 @@ def _write_valid_text_article_project(project: Path, platform: str) -> None:
 看似只是省一步，结果最容易出错的，反而是这一步。
 
 ## 正文
-很多人先给答案，再回头找证据。更稳妥的做法，是先核对来源，再把复杂内容讲成普通人听得懂的话。
+{article_body}
 
 ## 图片/截图
 - 纯文案模式已启用。
@@ -532,6 +539,23 @@ def test_verify_text_only_article_completion_for_each_platform(tmp_path: Path, p
     assert result["missing"] == []
     assert result["issues"] == []
     assert result["summary"]["frame_files"] == 0
+
+
+def test_verify_rejects_short_bilibili_body_even_when_quality_report_says_passed(tmp_path: Path):
+    project = tmp_path / "bilibili-short"
+    _write_valid_text_article_project(project, "bilibili")
+    post_path = project / "analysis/bilibili-post.json"
+    post = read_json(post_path)
+    post["body"] = "这是一篇只有一百多字的短稿，不能覆盖完整视频内容。" * 4
+    write_json(post_path, post)
+
+    result = verify_project(project)
+
+    issue = next(item for item in result["issues"] if item["code"] == "platform_post_body_too_short")
+    assert result["completed_ok"] is False
+    assert issue["details"]["minimum_chars"] == 1000
+    assert result["text_only"] is True
+    assert result["missing"] == []
 
 
 def test_verify_text_only_article_rejects_unmarked_empty_visual_artifacts(tmp_path: Path):
@@ -975,7 +999,7 @@ def test_verify_completed_project_reports_verbatim_markdown_body(tmp_path: Path)
     write_json(project / "analysis/content-assets.json", content_assets)
     markdown_path = project / "analysis/xhs-post.md"
     markdown = markdown_path.read_text(encoding="utf-8")
-    markdown_path.write_text(markdown.replace("\n正文\n", f"\n{source_text}\n", 1), encoding="utf-8")
+    markdown_path.write_text(markdown.replace(_valid_body_for_platform("xhs"), source_text, 1), encoding="utf-8")
 
     result = verify_project(project)
 

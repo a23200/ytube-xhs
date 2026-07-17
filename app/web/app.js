@@ -1338,7 +1338,11 @@ function renderQualitySummary(report, post) {
   if (!report) return "";
   const similarity = report.similarity || {};
   const data = report.data_concretization || {};
+  const bodyLength = report.body_length || {};
   const rewritePercent = Math.round(Number(similarity.estimated_rewrite_degree || 0) * 100);
+  const bodyLengthLabel = bodyLength.actual_chars === undefined
+    ? "未记录"
+    : `${Number(bodyLength.actual_chars)} / ${Number(bodyLength.minimum_chars || 0)}-${Number(bodyLength.maximum_chars || 0)} 字`;
   return `
     <div class="summary-block">
       <div class="row between wrap">
@@ -1346,6 +1350,7 @@ function renderQualitySummary(report, post) {
         <span class="mini-pill ${report.passed ? "status-ok" : "status-error"}">${report.passed ? "已通过" : "未通过"}</span>
       </div>
       <div class="meta-grid compact-meta">
+        <div class="meta-item"><span>正文有效字数</span><b>${escapeHtml(bodyLengthLabel)}</b></div>
         <div class="meta-item"><span>估算改写程度</span><b>${rewritePercent}%</b></div>
         <div class="meta-item"><span>最长重复片段</span><b>${Number(similarity.longest_common_fragment_chars || 0)} 字</b></div>
         <div class="meta-item"><span>定向重写次数</span><b>${Number(report.rewrite_count || 0)}</b></div>

@@ -9,6 +9,8 @@ class PlatformAdapter:
     key: str
     name: str
     content_type: str
+    min_body_chars: int
+    max_body_chars: int
     length_guidance: str
     style_guidance: str
     post_filename: str
@@ -64,7 +66,9 @@ PLATFORMS: Dict[str, PlatformAdapter] = {
         key="xhs",
         name="小红书",
         content_type="可直接发布的生活化原创文章",
-        length_guidance="正文建议 800 至 1400 个中文字符，以自然短段落组织。",
+        min_body_chars=800,
+        max_body_chars=1400,
+        length_guidance="正文必须达到 800 至 1400 个有效字符，以自然短段落组织；不足 800 字不能作为完成稿。",
         style_guidance="信息密度高、口语化、适合移动端阅读和收藏转发，避免种草套话与表情符号堆砌。",
         post_filename="xiaohongshu-post.json",
         markdown_filename="xhs-post.md",
@@ -78,7 +82,9 @@ PLATFORMS: Dict[str, PlatformAdapter] = {
         key="toutiao",
         name="今日头条",
         content_type="可直接发布的资讯型原创文章",
-        length_guidance="正文建议 1200 至 2200 个中文字符，以连续自然段展开。",
+        min_body_chars=1200,
+        max_body_chars=2200,
+        length_guidance="正文必须达到 1200 至 2200 个有效字符，以连续自然段展开；不足 1200 字不能作为完成稿。",
         style_guidance="标题清楚，正文重事实、背景、因果和读者关切，少用营销语气，不使用章节小标题。",
         post_filename="toutiao-post.json",
         markdown_filename="toutiao-post.md",
@@ -92,7 +98,9 @@ PLATFORMS: Dict[str, PlatformAdapter] = {
         key="douyin",
         name="抖音",
         content_type="可直接使用的短视频口播文章与发布文案",
-        length_guidance="正文建议 500 至 1000 个中文字符，节奏紧凑，但仍保持完整事实和自然段。",
+        min_body_chars=500,
+        max_body_chars=1000,
+        length_guidance="正文必须达到 500 至 1000 个有效字符，节奏紧凑，但仍保持完整事实和自然段；不足 500 字不能作为完成稿。",
         style_guidance="口语、短句、画面感强，先抛冲突再解释，避免口号、夸张标题党和生硬专业术语。",
         post_filename="douyin-post.json",
         markdown_filename="douyin-post.md",
@@ -106,7 +114,9 @@ PLATFORMS: Dict[str, PlatformAdapter] = {
         key="bilibili",
         name="哔哩哔哩",
         content_type="可直接发布的动态或专栏型原创文章",
-        length_guidance="正文建议 1000 至 2000 个中文字符，以连贯自然段解释事实和观点。",
+        min_body_chars=1000,
+        max_body_chars=2000,
+        length_guidance="正文必须达到 1000 至 2000 个有效字符，以连贯自然段解释事实和观点；不足 1000 字不能作为完成稿。",
         style_guidance="表达真诚、信息扎实、专业概念讲人话，保留必要上下文，不使用报告式章节小标题。",
         post_filename="bilibili-post.json",
         markdown_filename="bilibili-post.md",
@@ -141,6 +151,7 @@ def public_platform_capabilities() -> list[dict]:
             "key": item.key,
             "name": item.name,
             "content_type": item.content_type,
+            "body_length": {"min_chars": item.min_body_chars, "max_chars": item.max_body_chars},
             "length_guidance": item.length_guidance,
             "supports": {
                 "source_analysis": item.source_analysis,

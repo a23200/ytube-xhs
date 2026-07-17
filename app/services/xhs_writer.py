@@ -56,6 +56,8 @@ def _platform_prompt(platform: str) -> Dict[str, str]:
         "user": (
             f"基于 content_assets 生成 {adapter.post_filename}。{HOOK_INSTRUCTION}"
             f"{adapter.length_guidance}{COMMON_ARTICLE_RULES}{image_guidance}"
+            "必须阅读 transcript_timeline 的完整时间线，覆盖来源中有实质信息的开头、中段和结尾主题；"
+            "即使 content_assets 标记为本地降级，也不得只围绕其中少量证据点写短文。"
             "如果 keyframes 非空，image_plan 每一项的 source_frame_path/source_frame_time 只能使用 keyframes 中真实存在的值。"
             "如果 keyframes 为空，source_frame_time 和 source_frame_path 必须为 null。"
             "返回字段必须匹配 schema，不能省略任何字段。\n\n"
@@ -338,6 +340,43 @@ def _compact_visual_for_prompt(visual_payload: Dict[str, Any]) -> Dict[str, Any]
     }
 
 
+def _compact_transcript_for_prompt(
+    transcript_payload: Optional[Dict[str, Any]],
+    *,
+    max_segments: int = 180,
+    max_text_chars: int = 240,
+) -> Dict[str, Any]:
+    if not isinstance(transcript_payload, dict):
+        return {"source": None, "language": None, "segment_count": 0, "segments_in_prompt": 0, "segments": []}
+    source_segments = [item for item in transcript_payload.get("segments", []) or [] if isinstance(item, dict)]
+    if len(source_segments) <= max_segments:
+        selected = source_segments
+    else:
+        indices = sorted(
+            {
+                round(index * (len(source_segments) - 1) / (max_segments - 1))
+                for index in range(max_segments)
+            }
+        )
+        selected = [source_segments[index] for index in indices]
+    segments = [
+        {
+            "start": item.get("start"),
+            "end": item.get("end"),
+            "text": _clip(item.get("text"), max_text_chars),
+        }
+        for item in selected
+        if clean_text(str(item.get("text") or ""))
+    ]
+    return {
+        "source": transcript_payload.get("source"),
+        "language": transcript_payload.get("language"),
+        "segment_count": len(source_segments),
+        "segments_in_prompt": len(segments),
+        "segments": segments,
+    }
+
+
 def _source_texts(content_assets: Dict[str, Any]) -> list[str]:
     texts = []
     for item in content_assets.get("source_evidence", []) or []:
@@ -405,6 +444,7 @@ def _post_context(
     keyframes_payload: Dict[str, Any],
     visual_payload: Dict[str, Any],
     style: str,
+    transcript_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     return {
         "metadata": {
@@ -414,6 +454,7 @@ def _post_context(
             "duration": metadata.get("duration"),
         },
         "content_assets": _compact_content_assets_for_prompt(content_assets),
+        "transcript_timeline": _compact_transcript_for_prompt(transcript_payload),
         "keyframes": _compact_keyframes_for_prompt(keyframes_payload),
         "visual_analysis": _compact_visual_for_prompt(visual_payload),
         "style": style,
@@ -445,6 +486,7 @@ def _rewrite_post_for_quality(
     style: str,
     platform: str,
     quality_report: Dict[str, Any],
+    transcript_payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     prompt = PLATFORM_PROMPTS[platform]
     return llm_client.json_chat(
@@ -455,7 +497,8 @@ def _rewrite_post_for_quality(
                     f"你是{prompt['name']}文章质量审校。请根据机器校验报告定向重写完整平台稿 JSON。"
                     "保留来源事实、数字口径、人物、因果、标题数量、image_plan 页数以及所有真实来源锚点。"
                     "正文只能由连贯自然段构成，不得使用任何小标题。开头必须在100个中文字符以内，有真实反差、冲突或悬念，"
-                    "专业词换成大白话。不得连续照搬来源原文24个字符以上，不得编造人口总量或数据，返回严格 JSON。"
+                    f"专业词换成大白话。{get_platform(platform).length_guidance}"
+                    "不得连续照搬来源原文24个字符以上，不得编造人口总量或数据，返回严格 JSON。"
                 ),
             },
             {
@@ -466,7 +509,7 @@ def _rewrite_post_for_quality(
                     "\n\n"
                     f"Schema:\n{json.dumps(_post_schema(), ensure_ascii=False)}\n\n"
                     f"Quality report:\n{json.dumps(quality_report, ensure_ascii=False)}\n\n"
-                    f"Context:\n{json.dumps(_post_context(metadata, content_assets, keyframes_payload, visual_payload, style), ensure_ascii=False)}\n\n"
+                    f"Context:\n{json.dumps(_post_context(metadata, content_assets, keyframes_payload, visual_payload, style, transcript_payload), ensure_ascii=False)}\n\n"
                     f"Draft JSON:\n{json.dumps(payload, ensure_ascii=False)}"
                 ),
             },
@@ -525,6 +568,7 @@ def _guard_or_rewrite_post(
             style,
             platform,
             report,
+            transcript_payload,
         )
         current = _validate_post_payload(current, keyframes_payload, paths, platform=platform)
     raise RuntimeError("Unreachable quality validation state")
@@ -591,7 +635,7 @@ def write_platform_post(
     adapter = get_platform(platform)
     prompt = PLATFORM_PROMPTS[adapter.key]
     schema = _post_schema()
-    context = _post_context(metadata, content_assets, keyframes_payload, visual_payload, style)
+    context = _post_context(metadata, content_assets, keyframes_payload, visual_payload, style, transcript_payload)
     try:
         payload = llm_client.json_chat(
             [

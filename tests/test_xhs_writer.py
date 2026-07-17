@@ -29,8 +29,12 @@ def _valid_post(body: str) -> dict:
     }
 
 
+def _valid_length_body(prefix: str = "先保存证据，再换成自己的判断和行动建议。") -> str:
+    return prefix + "补充说明" * 210 + "最后复核全文。"
+
+
 def _post_with(**overrides) -> dict:
-    payload = _valid_post("这条内容提炼成一个可执行提醒：先保留证据，再重写成自己的表达。")
+    payload = _valid_post(_valid_length_body())
     payload.update(overrides)
     return payload
 
@@ -153,7 +157,7 @@ def test_write_xhs_post_rewrites_verbatim_body_on_second_llm_pass(tmp_path: Path
         calls.append(args)
         if len(calls) == 1:
             return _valid_post(copied_body)
-        return _valid_post("先保存证据，再换成自己的判断和行动建议，这样内容才适合公开发布。")
+        return _valid_post(_valid_length_body())
 
     monkeypatch.setattr(xhs_writer.llm_client, "json_chat", fake_json_chat)
 
@@ -170,7 +174,7 @@ def test_write_xhs_post_allows_rewritten_copy(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         xhs_writer.llm_client,
         "json_chat",
-        lambda *args, **kwargs: _valid_post("这条内容提炼成一个可执行提醒：先保留证据，再重写成自己的表达。"),
+        lambda *args, **kwargs: _valid_post(_valid_length_body("这条内容提炼成一个可执行提醒：先保留证据，再重写成自己的表达。")),
     )
 
     payload = xhs_writer.write_xhs_post({}, _content_assets(), _keyframes(paths), {"frames": []}, "干货", paths)

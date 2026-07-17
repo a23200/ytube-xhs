@@ -45,6 +45,12 @@ PLATFORM_NAMES = {
     "douyin": "抖音",
     "bilibili": "哔哩哔哩",
 }
+PLATFORM_BODY_LIMITS = {
+    "xhs": (800, 1400),
+    "toutiao": (1200, 2200),
+    "douyin": (500, 1000),
+    "bilibili": (1000, 2000),
+}
 PLATFORM_POST_KINDS = {
     "xhs": "xhs_post_json",
     "toutiao": "toutiao_post_json",
@@ -427,6 +433,10 @@ def _clean_text(value: Any) -> str:
     text = TAG_RE.sub("", text)
     text = text.replace("\u200b", "")
     return SPACE_RE.sub(" ", text).strip()
+
+
+def _article_body_length(value: Any) -> int:
+    return len(re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", _clean_text(value)))
 
 
 def _unique_clean_texts(values: Iterable[Any]) -> List[str]:
@@ -1037,6 +1047,24 @@ def _verify_article_outputs(
         _add_issue(issues, "platform_mismatch", post_artifact, "Generated post platform name does not match project platform.", {"expected": PLATFORM_NAMES[platform], "actual": post.get("platform_name")})
     if not isinstance(post.get("titles"), list) or len(post.get("titles", [])) < 5:
         _add_issue(issues, "platform_post_too_few_titles", post_artifact, "Platform post must contain at least five titles.")
+    minimum_body_chars, maximum_body_chars = PLATFORM_BODY_LIMITS[platform]
+    body_chars = _article_body_length(post.get("body"))
+    if body_chars < minimum_body_chars:
+        _add_issue(
+            issues,
+            "platform_post_body_too_short",
+            post_artifact,
+            "Completed platform article body is shorter than the required minimum.",
+            {"actual_chars": body_chars, "minimum_chars": minimum_body_chars, "maximum_chars": maximum_body_chars},
+        )
+    elif body_chars > maximum_body_chars:
+        _add_issue(
+            issues,
+            "platform_post_body_too_long",
+            post_artifact,
+            "Completed platform article body exceeds the allowed maximum.",
+            {"actual_chars": body_chars, "minimum_chars": minimum_body_chars, "maximum_chars": maximum_body_chars},
+        )
     image_plan = post.get("image_plan")
     if not isinstance(image_plan, list) or not image_plan:
         _add_issue(issues, "platform_post_empty_image_plan", post_artifact, "Platform post must contain image_plan.")

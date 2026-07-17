@@ -3,6 +3,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from app.services.errors import PipelineError
+from app.services.platforms import get_platform
 from app.services.text_utils import clean_text
 
 MIN_VERBATIM_CHARS = 24
@@ -59,6 +60,10 @@ SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;\n]+")
 
 def _normalized_chars(value: Any) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", clean_text(str(value or ""))).lower()
+
+
+def article_body_length(value: Any) -> int:
+    return len(_normalized_chars(value))
 
 
 def _source_texts(content_assets: Dict[str, Any], transcript_payload: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -294,6 +299,8 @@ def evaluate_article_quality(
     source_text = "\n".join(source_parts)
     generated_text = visible_post_text(payload)
     body = str(payload.get("body") or "")
+    body_length = article_body_length(body)
+    adapter = get_platform(platform)
     hook = clean_text(str(payload.get("hook") or ""))
     headings = find_subheadings(body)
     mechanical = next((prefix for prefix in MECHANICAL_HOOK_PREFIXES if hook.startswith(prefix)), "")
@@ -331,6 +338,28 @@ def evaluate_article_quality(
     if headings:
         violations.append(
             {"code": "subheading_detected", "field": "body", "message": "正文包含小标题。", "matches": headings}
+        )
+    if body_length < adapter.min_body_chars:
+        violations.append(
+            {
+                "code": "body_too_short",
+                "field": "body",
+                "message": f"正文只有 {body_length} 个有效字符，{adapter.name}完成稿至少需要 {adapter.min_body_chars} 个。",
+                "actual_chars": body_length,
+                "minimum_chars": adapter.min_body_chars,
+                "maximum_chars": adapter.max_body_chars,
+            }
+        )
+    if body_length > adapter.max_body_chars:
+        violations.append(
+            {
+                "code": "body_too_long",
+                "field": "body",
+                "message": f"正文有 {body_length} 个有效字符，超过{adapter.name}完成稿上限 {adapter.max_body_chars} 个。",
+                "actual_chars": body_length,
+                "minimum_chars": adapter.min_body_chars,
+                "maximum_chars": adapter.max_body_chars,
+            }
         )
     if longest and len(longest) >= MIN_VERBATIM_CHARS:
         violations.append(
@@ -373,9 +402,17 @@ def evaluate_article_quality(
             "minimum_rewrite_degree": MIN_REWRITE_DEGREE,
             "verbatim_min_chars": MIN_VERBATIM_CHARS,
             "ngram_size": NGRAM_SIZE,
+            "body_min_chars": adapter.min_body_chars,
+            "body_max_chars": adapter.max_body_chars,
             "originality_note": "这是可解释的文本改写程度估算，不是版权或平台原创认证。",
         },
         "hook": {"text": hook, "chars": len(hook), "has_contrast_marker": has_contrast, "mechanical_prefix": mechanical or None},
+        "body_length": {
+            "actual_chars": body_length,
+            "minimum_chars": adapter.min_body_chars,
+            "maximum_chars": adapter.max_body_chars,
+            "within_range": adapter.min_body_chars <= body_length <= adapter.max_body_chars,
+        },
         "structure": {"subheadings": headings},
         "similarity": {
             "ngram_containment": round(ngram, 4),

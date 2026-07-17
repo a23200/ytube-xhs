@@ -21,13 +21,15 @@ from app.services.task_manager import ChildProcessRegistry, TaskManager
 
 
 def _valid_post(platform: str = "xhs") -> dict:
+    adapter = get_platform(platform)
+    body = "补充说明" * ((adapter.min_body_chars + 100) // 4) + "最后复核全文"
     return {
         "content_type": "原创文章",
         "target_audience": ["普通读者"],
         "titles": ["标题一", "标题二", "标题三", "标题四", "标题五"],
         "cover_text": "先别急着下结论",
         "hook": "看似只是省一步，结果最贵的代价，反而藏在这一步里。",
-        "body": "很多人习惯先给答案，再去找证据。更稳妥的做法，是先核对来源和口径，再把复杂概念换成生活中的话。\n\n这样写出来的内容更容易看懂，也不需要靠照搬原话制造可信感。",
+        "body": body,
         "image_plan": [
             {
                 "page": 1,
@@ -93,6 +95,7 @@ def test_platform_registry_exposes_four_truthful_adapters():
     capabilities = {item["key"]: item for item in public_platform_capabilities()}
     assert set(capabilities) == set(platform_keys())
     assert all(item["supports"]["docx_export"] for item in capabilities.values())
+    assert capabilities["bilibili"]["body_length"] == {"min_chars": 1000, "max_chars": 2000}
     assert all(item["supports"]["automatic_publish"] is False for item in capabilities.values())
     assert capabilities["douyin"]["supports"]["image_generation"] is False
 
@@ -116,12 +119,22 @@ def test_platform_writer_uses_platform_prompt_and_artifact(tmp_path: Path, monke
         "干货",
         paths,
         platform=platform,
+        transcript_payload={
+            "source": "faster-whisper",
+            "language": "zh",
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": "完整转录开头证据"},
+                {"start": 8.0, "end": 10.0, "text": "完整转录结尾证据"},
+            ],
+        },
     )
 
     adapter = get_platform(platform)
     assert payload["platform"] == platform
     assert adapter.name in seen[0][0]["content"]
     assert "不得出现任何小标题" in seen[0][0]["content"]
+    assert "transcript_timeline" in seen[0][1]["content"]
+    assert "完整转录结尾证据" in seen[0][1]["content"]
     assert (paths.analysis_dir / adapter.post_filename).exists()
     assert (paths.analysis_dir / adapter.quality_filename).exists()
 
@@ -135,6 +148,61 @@ def test_article_quality_detects_subheading_hook_and_verbatim_copy():
     codes = {item["code"] for item in report["violations"]}
     assert {"mechanical_hook", "hook_lacks_contrast", "subheading_detected", "verbatim_source_copy_detected"} <= codes
     assert find_subheadings(post["body"])[0]["reason"] == "ordered_heading"
+
+
+def test_article_quality_rejects_short_bilibili_body():
+    post = _valid_post("bilibili")
+    post["body"] = "这篇正文只有很少几句话，无法覆盖完整来源。"
+
+    report = evaluate_article_quality(post, _content_assets(), platform="bilibili")
+
+    violation = next(item for item in report["violations"] if item["code"] == "body_too_short")
+    assert report["passed"] is False
+    assert report["body_length"]["actual_chars"] < 1000
+    assert violation["minimum_chars"] == 1000
+
+
+def test_bilibili_writer_rewrites_short_draft_with_full_transcript(tmp_path: Path, monkeypatch):
+    paths = ProjectPaths(tmp_path / "bilibili")
+    paths.ensure()
+    short_post = _valid_post("bilibili")
+    short_post["body"] = "短稿不能覆盖完整来源。" * 8
+    complete_post = _valid_post("bilibili")
+    calls = []
+
+    def fake_chat(messages, **kwargs):
+        calls.append(messages)
+        return short_post if len(calls) == 1 else complete_post
+
+    monkeypatch.setattr(xhs_writer.llm_client, "json_chat", fake_chat)
+    transcript = {
+        "source": "faster-whisper",
+        "language": "zh",
+        "segments": [
+            {"start": 0.0, "end": 2.0, "text": "来源开头讲第一道防线"},
+            {"start": 210.0, "end": 220.0, "text": "来源中段讲免疫过度反应"},
+            {"start": 330.0, "end": 340.0, "text": "来源结尾讲移植排斥问题"},
+        ],
+    }
+
+    payload = xhs_writer.write_platform_post(
+        {"title": "免疫系统"},
+        _content_assets(),
+        {"keyframes": []},
+        {"frames": []},
+        "干货",
+        paths,
+        platform="bilibili",
+        transcript_payload=transcript,
+    )
+
+    assert len(calls) == 2
+    assert "body_too_short" in calls[1][1]["content"]
+    assert "来源结尾讲移植排斥问题" in calls[1][1]["content"]
+    assert len(payload["body"]) >= 1000
+    quality = json.loads((paths.analysis_dir / "bilibili-quality-report.json").read_text(encoding="utf-8"))
+    assert quality["passed"] is True
+    assert quality["body_length"]["within_range"] is True
 
 
 def test_data_concretization_requires_source_grounding():
