@@ -101,6 +101,8 @@ cp .env.example .env
 应用启动时会自动读取项目根目录 `.env`，已有系统环境变量优先级更高。
 `XHS_RUNTIME_DIR` 支持绝对路径或相对路径；相对路径会按项目根目录解析，默认写入 `./runtime`。
 
+抖音以及部分 YouTube、哔哩哔哩公开视频可能要求最新浏览器 Cookie。交互式本机运行可设置 `XHS_YTDLP_COOKIES_FROM_BROWSER=chrome`；无人值守 launchd 服务建议从能正常打开目标视频的浏览器导出最新 `cookies.txt`，设置 `XHS_YTDLP_COOKIES_FILE=/absolute/path/to/cookies.txt`。出现 `yt_dlp_cookies_required` 时说明平台要求 Cookie，不代表公开视频已失效。
+
 配置 OpenAI-compatible LLM：
 
 ```bash

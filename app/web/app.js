@@ -513,6 +513,9 @@ function errorText(error) {
   if (detail?.code === "youtube_bot_check_required") {
     return "YouTube 要求登录确认不是机器人。请配置浏览器 Cookie（例如 XHS_YTDLP_COOKIES_FROM_BROWSER=chrome）或导出的 cookies.txt 后重试。";
   }
+  if (detail?.code === "yt_dlp_cookies_required") {
+    return "平台要求使用最新浏览器 Cookie，即使公开视频也可能需要。服务与 Chrome 使用同一登录用户时可设置 XHS_YTDLP_COOKIES_FROM_BROWSER=chrome；无人值守服务建议导出最新 cookies.txt 并设置 XHS_YTDLP_COOKIES_FILE，重启后重试。";
+  }
   if (detail?.code === "youtube_network_tls_failed") {
     return "当前运行环境到 YouTube 的网络/TLS 请求失败，视频可能仍是公开的。请稍后重试、换网络/IP，或配置浏览器导出的 cookies.txt 后再跑。";
   }

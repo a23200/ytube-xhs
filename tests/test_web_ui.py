@@ -89,6 +89,8 @@ def test_web_ui_serves_required_controls_and_assets():
         "生图自检",
         "检查生图配置",
         "真实生成测试图",
+        "yt_dlp_cookies_required",
+        "平台要求使用最新浏览器 Cookie",
         "密钥已配置",
         'aria-disabled="true"',
     ]:

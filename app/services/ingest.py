@@ -209,6 +209,11 @@ def _is_youtube_bot_check_error(message: str) -> bool:
     return "confirm you're not a bot" in lowered or "confirm you’re not a bot" in lowered
 
 
+def _is_fresh_cookies_required(message: str) -> bool:
+    lowered = message.lower()
+    return "fresh cookies" in lowered and ("needed" in lowered or "required" in lowered)
+
+
 def _is_media_download_forbidden(message: str) -> bool:
     lowered = message.lower()
     return "unable to download video data" in lowered and ("http error 403" in lowered or "forbidden" in lowered)
@@ -505,6 +510,16 @@ def _raise_ingest_ytdlp_error(message: str, exc: Exception, url: str, language: 
             (
                 "YouTube is asking yt-dlp to sign in and confirm this request is not a bot. "
                 "Configure XHS_YTDLP_COOKIES_FROM_BROWSER=chrome or XHS_YTDLP_COOKIES_FILE=/path/to/cookies.txt, then retry."
+            ),
+            message,
+        ) from exc
+    if _is_fresh_cookies_required(message):
+        raise _yt_dlp_error(
+            "yt_dlp_cookies_required",
+            (
+                "The platform requires fresh browser cookies even for this public video. "
+                "Configure XHS_YTDLP_COOKIES_FROM_BROWSER=chrome when the service runs as the logged-in browser user, "
+                "or export a fresh cookies.txt file and set XHS_YTDLP_COOKIES_FILE, then restart and retry."
             ),
             message,
         ) from exc

@@ -144,7 +144,7 @@ XHS_IMAGE_MODEL=你的生图模型
 XHS_IMAGE_REQUIRE_API_KEY=auto
 ```
 
-YouTube cookies：无人值守服务不建议依赖 Chrome profile。若确实需要，导出 `cookies.txt` 到：
+平台 Cookie：抖音以及部分 YouTube、哔哩哔哩公开视频也可能要求最新浏览器 Cookie。无人值守服务不建议依赖 Chrome profile，优先从能正常打开目标视频的浏览器导出最新 `cookies.txt` 到：
 
 ```bash
 sudo mkdir -p /opt/ytube-xhs/secrets
@@ -159,6 +159,15 @@ sudo chmod 600 /opt/ytube-xhs/secrets/cookies.txt
 XHS_YTDLP_COOKIES_FILE=/opt/ytube-xhs/secrets/cookies.txt
 XHS_YTDLP_COOKIES_FROM_BROWSER=
 ```
+
+如果服务以当前已登录的 macOS 用户运行，并且该用户的 Chrome 能正常打开目标视频，也可不使用 Cookie 文件，改为：
+
+```env
+XHS_YTDLP_COOKIES_FILE=
+XHS_YTDLP_COOKIES_FROM_BROWSER=chrome
+```
+
+`Fresh cookies (not necessarily logged in) are needed` 表示平台需要新的匿名或登录态浏览器 Cookie，不代表公开视频已失效。配置过期 Cookie 时会返回 `yt_dlp_cookies_invalid`；完全未配置但平台明确要求时会返回 `yt_dlp_cookies_required`。
 
 配置后重启：
 
