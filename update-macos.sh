@@ -152,6 +152,14 @@ else
 fi
 chmod +x "$INSTALLER"
 
+# Bash 3.2 treats an empty "${array[@]}" expansion as an unbound variable
+# under `set -u`. Convert the optional passthrough list to safe positional args.
+if [ "${#PASSTHROUGH[@]}" -gt 0 ]; then
+  set -- "${PASSTHROUGH[@]}"
+else
+  set --
+fi
+
 YTXHS_REPO="$REPO" \
 YTXHS_REF="$REF" \
 YTXHS_APP_DIR="$APP_DIR" \
@@ -159,7 +167,7 @@ YTXHS_HOST="$HOST" \
 YTXHS_PORT="$PORT" \
 YTXHS_SERVICE_USER="$SERVICE_USER" \
 YTXHS_LAUNCHD_MODE="$LAUNCHD_MODE" \
-bash "$INSTALLER" "${PASSTHROUGH[@]}"
+bash "$INSTALLER" "$@"
 
 if [ "$POST_ACTION" != "none" ]; then
   if [ ! -x "$APP_DIR/start.sh" ]; then
