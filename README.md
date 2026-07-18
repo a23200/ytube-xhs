@@ -103,6 +103,8 @@ cp .env.example .env
 
 抖音以及部分 YouTube、哔哩哔哩公开视频可能要求最新浏览器 Cookie。交互式本机运行可设置 `XHS_YTDLP_COOKIES_FROM_BROWSER=chrome`；无人值守 launchd 服务建议从能正常打开目标视频的浏览器导出最新 `cookies.txt`，设置 `XHS_YTDLP_COOKIES_FILE=/absolute/path/to/cookies.txt`。出现 `yt_dlp_cookies_required` 时说明平台要求 Cookie，不代表公开视频已失效。
 
+对于能在 `iesdouyin.com` 公开分享页直接展示的抖音视频，yt-dlp 明确要求 fresh cookies 时会自动尝试同平台公开分享页回退：校验作品 ID 后读取结构化 `_ROUTER_DATA`，直接下载公开 MP4，不调用第三方解析站。分享页未公开、图文、登录/付费/受限内容仍不会绕过平台限制，并继续返回结构化 Cookie 或公开分享页错误。
+
 配置 OpenAI-compatible LLM：
 
 ```bash

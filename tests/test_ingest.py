@@ -1,5 +1,6 @@
 import sys
 import types
+import json
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,32 @@ class FakeThumbnailResponse:
 
     def read(self):
         return _valid_png_bytes()
+
+
+class FakeHTTPResponse:
+    def __init__(self, data: bytes, *, url: str, content_type: str):
+        self._data = data
+        self._offset = 0
+        self._url = url
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            data = self._data[self._offset :]
+            self._offset = len(self._data)
+            return data
+        data = self._data[self._offset : self._offset + size]
+        self._offset += len(data)
+        return data
+
+    def geturl(self):
+        return self._url
 
 
 def test_download_thumbnail_normalizes_supported_images_to_jpg(tmp_path: Path, monkeypatch):
@@ -227,6 +254,78 @@ def test_ingest_reports_youtube_bot_check_with_cookie_guidance(tmp_path: Path, m
     assert error["code"] == "youtube_bot_check_required"
     assert "XHS_YTDLP_COOKIES_FROM_BROWSER" in error["message"]
     assert error["details"]["cookies_from_browser_configured"] is False
+
+
+def test_douyin_public_share_fallback_downloads_video_without_cookies(tmp_path: Path, monkeypatch):
+    paths = ingest.ProjectPaths(tmp_path / "project")
+    paths.ensure()
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_file", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_cookies_from_browser", None)
+    monkeypatch.setattr(ingest.settings, "ytdlp_impersonate", None)
+    monkeypatch.setattr(ingest, "_download_thumbnail", lambda url, output_path: None)
+    _install_fake_ytdlp(monkeypatch, "ERROR: [Douyin] 7658533907561963193: Fresh cookies (not necessarily logged in) are needed")
+
+    router_data = {
+        "loaderData": {
+            "video_(id)/page": {
+                "videoInfoRes": {
+                    "item_list": [
+                        {
+                            "aweme_id": "7658533907561963193",
+                            "desc": "Public health video",
+                            "create_time": 1700000000,
+                            "author": {"nickname": "Doctor", "uid": "author-1"},
+                            "video": {
+                                "duration": 152134,
+                                "play_addr": {"uri": "public-play-uri"},
+                                "cover": {"url_list": ["https://example.test/cover.jpg"]},
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    html = f"<script>window._ROUTER_DATA = {json.dumps(router_data)}</script>".encode()
+    video_bytes = b"ftyp" + b"v" * 2048
+    seen_urls = []
+
+    def fake_urlopen(request, timeout):
+        request_url = request.full_url
+        seen_urls.append(request_url)
+        if "iesdouyin.com/share/video/" in request_url:
+            return FakeHTTPResponse(html, url=request_url, content_type="text/html")
+        if "aweme/v1/play/" in request_url:
+            return FakeHTTPResponse(video_bytes, url=request_url, content_type="video/mp4")
+        raise AssertionError(request_url)
+
+    monkeypatch.setattr(ingest.urllib.request, "urlopen", fake_urlopen)
+
+    metadata = ingest.ingest_video(
+        "https://www.douyin.com/video/7658533907561963193",
+        "zh",
+        paths,
+        prefer_subtitles_only=True,
+    )
+
+    video_path = paths.source_dir / "7658533907561963193.mp4"
+    assert metadata["video_id"] == "7658533907561963193"
+    assert metadata["title"] == "Public health video"
+    assert metadata["author"] == "Doctor"
+    assert metadata["duration"] == pytest.approx(152.134)
+    assert metadata["source_extractor"] == "DouyinPublicShare"
+    assert metadata["video_file"] == str(video_path)
+    assert video_path.read_bytes() == video_bytes
+    assert not list(paths.source_dir.glob("*.part"))
+    assert any("public share page" in warning for warning in metadata["ingest_warnings"])
+    assert any("video_id=public-play-uri" in request_url for request_url in seen_urls)
+
+
+def test_douyin_router_data_rejects_mismatched_video_id():
+    payload = {"loaderData": {"route": {"result": {"item_list": [{"aweme_id": "999"}]}}}}
+
+    with pytest.raises(ValueError, match="matching public video item is missing"):
+        ingest._douyin_item_from_router_data(payload, "7658533907561963193")
 
 
 def test_ingest_reports_media_download_403_with_actionable_guidance(tmp_path: Path, monkeypatch):

@@ -169,6 +169,8 @@ XHS_YTDLP_COOKIES_FROM_BROWSER=chrome
 
 `Fresh cookies (not necessarily logged in) are needed` 表示平台需要新的匿名或登录态浏览器 Cookie，不代表公开视频已失效。配置过期 Cookie 时会返回 `yt_dlp_cookies_invalid`；完全未配置但平台明确要求时会返回 `yt_dlp_cookies_required`。
 
+抖音公开视频另有同平台公开分享页回退：当 yt-dlp 明确要求 fresh cookies，且 `iesdouyin.com/share/video/{id}/` 公开返回匹配作品 ID 的结构化数据时，系统直接下载公开 MP4，不依赖第三方解析服务。未公开、图文或受限内容仍需要合法 Cookie/授权。
+
 配置后重启：
 
 ```bash

@@ -1,4 +1,8 @@
+import json
+import re
+import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -17,6 +21,12 @@ DEFAULT_YTDLP_FORMAT = "bv*[height<=360]+ba/b[height<=360]/best[height<=360]/bes
 PUBLIC_ANDROID_FALLBACK_FORMAT = "18/best[height<=360]/best"
 AUDIO_ONLY_FORMAT = "ba[abr<=64]/ba/bestaudio/best"
 AUDIO_EXTENSIONS = {".m4a", ".mp3", ".webm", ".opus", ".ogg", ".wav", ".aac"}
+DOUYIN_PUBLIC_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+)
+DOUYIN_CONTENT_ID_RE = re.compile(r"/(?:video|note|share/video|share/note)/(\d{15,})")
+DOUYIN_QUERY_ID_KEYS = ("modal_id", "item_id", "video_id", "note_id")
 
 
 def _track_summary(tracks: Dict[str, Any]) -> Dict[str, Any]:
@@ -176,6 +186,170 @@ def _find_downloaded_subtitle(source_dir: Path, video_id: Optional[str]) -> Opti
     if preferred[0] != target:
         target.write_bytes(preferred[0].read_bytes())
     return target
+
+
+def _douyin_content_id(value: str) -> Optional[str]:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host != "douyin.com" and not host.endswith(".douyin.com"):
+        return None
+    match = DOUYIN_CONTENT_ID_RE.search(parsed.path)
+    if match:
+        return match.group(1)
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in DOUYIN_QUERY_ID_KEYS:
+        values = query.get(key) or []
+        if values and re.fullmatch(r"\d{15,}", values[0]):
+            return values[0]
+    return None
+
+
+def _douyin_request(url: str, *, referer: Optional[str] = None) -> urllib.request.Request:
+    headers = {"User-Agent": DOUYIN_PUBLIC_USER_AGENT}
+    if referer:
+        headers["Referer"] = referer
+    return urllib.request.Request(url, headers=headers)
+
+
+def _resolve_douyin_content_id(url: str) -> Optional[str]:
+    content_id = _douyin_content_id(url)
+    if content_id:
+        return content_id
+    try:
+        with urllib.request.urlopen(_douyin_request(url), timeout=settings.ytdlp_socket_timeout_seconds) as response:
+            return _douyin_content_id(response.geturl())
+    except Exception:
+        return None
+
+
+def _router_data_from_html(html: str) -> Dict[str, Any]:
+    marker = "window._ROUTER_DATA"
+    marker_start = html.find(marker)
+    if marker_start < 0:
+        raise ValueError("window._ROUTER_DATA is missing")
+    assignment_start = html.find("=", marker_start + len(marker))
+    if assignment_start < 0:
+        raise ValueError("window._ROUTER_DATA assignment is missing")
+    payload, _ = json.JSONDecoder().raw_decode(html[assignment_start + 1 :].lstrip())
+    if not isinstance(payload, dict):
+        raise ValueError("window._ROUTER_DATA is not an object")
+    return payload
+
+
+def _douyin_item_from_router_data(payload: Dict[str, Any], expected_id: str) -> Dict[str, Any]:
+    loader_data = payload.get("loaderData") or {}
+    if not isinstance(loader_data, dict):
+        raise ValueError("loaderData is missing")
+    for route_data in loader_data.values():
+        if not isinstance(route_data, dict):
+            continue
+        for result in route_data.values():
+            if not isinstance(result, dict):
+                continue
+            for item in result.get("item_list") or []:
+                if isinstance(item, dict) and str(item.get("aweme_id") or "") == expected_id:
+                    return item
+    raise ValueError("matching public video item is missing")
+
+
+def _first_url(value: Any) -> Optional[str]:
+    for item in value or []:
+        if isinstance(item, str) and item.startswith(("https://", "http://")):
+            return item
+    return None
+
+
+def _douyin_public_info(url: str) -> tuple[Dict[str, Any], str]:
+    content_id = _resolve_douyin_content_id(url)
+    if not content_id:
+        raise PipelineError(
+            code="douyin_public_share_unavailable",
+            message="The public Douyin fallback could not resolve a video ID from this URL.",
+            step="ingest",
+            details={"url": url},
+        )
+    share_url = f"https://www.iesdouyin.com/share/video/{content_id}/"
+    try:
+        with urllib.request.urlopen(_douyin_request(share_url), timeout=settings.ytdlp_socket_timeout_seconds) as response:
+            html = response.read().decode("utf-8", errors="replace")
+        item = _douyin_item_from_router_data(_router_data_from_html(html), content_id)
+        video = item.get("video") or {}
+        play_uri = str((video.get("play_addr") or {}).get("uri") or "").strip()
+        if not play_uri:
+            raise ValueError("public video play URI is missing")
+        author = item.get("author") or {}
+        cover_url = _first_url((video.get("cover") or {}).get("url_list"))
+        create_time = item.get("create_time")
+        upload_date = None
+        if isinstance(create_time, (int, float)):
+            upload_date = datetime.fromtimestamp(create_time, tz=timezone.utc).strftime("%Y%m%d")
+        info = {
+            "id": content_id,
+            "webpage_url": url,
+            "original_url": url,
+            "title": str(item.get("desc") or f"Douyin video {content_id}"),
+            "description": str(item.get("desc") or ""),
+            "uploader": author.get("nickname"),
+            "uploader_id": author.get("uid") or author.get("sec_uid"),
+            "duration": float(video.get("duration") or 0) / 1000.0 or None,
+            "thumbnail": cover_url,
+            "upload_date": upload_date,
+            "subtitles": {},
+            "automatic_captions": {},
+            "extractor_key": "DouyinPublicShare",
+        }
+        play_url = "https://www.douyin.com/aweme/v1/play/?" + urllib.parse.urlencode({"video_id": play_uri})
+        return info, play_url
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(
+            code="douyin_public_share_unavailable",
+            message="The public Douyin share page did not expose a usable public video stream.",
+            step="ingest",
+            details={"url": url, "share_url": share_url, "error": str(exc)},
+        ) from exc
+
+
+def _download_douyin_public_video(url: str, paths: ProjectPaths, *, text_only: bool) -> Dict[str, Any]:
+    info, play_url = _douyin_public_info(url)
+    target = paths.source_dir / f"{info['id']}.mp4"
+    partial = target.with_suffix(".mp4.part")
+    try:
+        request = _douyin_request(play_url, referer="https://www.douyin.com/")
+        with urllib.request.urlopen(request, timeout=max(30, settings.ytdlp_socket_timeout_seconds)) as response:
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            if "video" not in content_type and "octet-stream" not in content_type:
+                raise ValueError(f"unexpected media content type: {content_type or 'missing'}")
+            with partial.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+        if not partial.exists() or partial.stat().st_size < 1024:
+            raise ValueError("downloaded public video is empty")
+        partial.replace(target)
+    except Exception as exc:
+        partial.unlink(missing_ok=True)
+        if isinstance(exc, PipelineError):
+            raise
+        raise PipelineError(
+            code="douyin_public_media_download_failed",
+            message="The public Douyin share stream could not be downloaded.",
+            step="ingest",
+            details={"url": url, "error": str(exc)},
+        ) from exc
+    mode_note = (
+        "The yt-dlp Douyin extractor required fresh cookies, so text-only analysis used Douyin's public share page "
+        "to download a public MP4 for Whisper transcription. Keyframes, OCR, screenshots, and image-card generation remain disabled."
+        if text_only
+        else "The yt-dlp Douyin extractor required fresh cookies, so the public video was downloaded from Douyin's public share page."
+    )
+    return _write_metadata(info, paths, video_path=target, subtitle_path=None, ingest_warnings=[mode_note])
 
 
 def _classified_restriction(message: str) -> Optional[tuple[str, str]]:
@@ -624,6 +798,11 @@ def ingest_video(
             )
     except Exception as exc:
         message = str(exc)
+        if _is_fresh_cookies_required(message) and _resolve_douyin_content_id(url):
+            try:
+                return _download_douyin_public_video(url, paths, text_only=prefer_subtitles_only)
+            except PipelineError:
+                pass
         if _should_try_public_android_fallback(message):
             ingest_warnings.append(
                 (
