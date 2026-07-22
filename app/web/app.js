@@ -552,6 +552,11 @@ function textSnippet(text, length = 120) {
 function errorText(error) {
   const detail = error?.body?.detail ?? error?.detail ?? error;
   if (typeof detail === "string") return detail;
+  if (detail?.diagnostic) {
+    const title = detail.diagnostic.title || detail.code || "处理失败";
+    const actual = detail.diagnostic.actual_error || detail.message || "";
+    return actual && actual !== title ? `${title}：${actual}` : title;
+  }
   if (detail?.code === "youtube_media_download_forbidden") {
     return "YouTube 媒体流返回 403。链接可以公开查看，但当前运行环境被 YouTube 拒绝下载视频分片；系统会优先尝试使用真实字幕继续分析，若没有字幕则需要导出最新 cookies.txt 或换网络/IP 后重试。";
   }
@@ -594,6 +599,79 @@ function errorText(error) {
   if (detail?.message) return `${detail.code ? `${detail.code}: ` : ""}${detail.message}`;
   if (error?.message) return error.message;
   return JSON.stringify(detail);
+}
+
+function errorPayload(error) {
+  return error?.body?.detail ?? error?.detail ?? error ?? {};
+}
+
+function diagnosticLocationText(location = {}) {
+  const parts = [
+    location.stage_label,
+    location.component,
+    location.platform ? `输出目标 ${location.platform}` : "",
+    location.artifact ? `产物 ${location.artifact}` : "",
+    location.field ? `字段 ${location.field}` : "",
+    location.index !== undefined ? `索引 ${location.index}` : "",
+    location.evidence_index !== undefined ? `证据索引 ${location.evidence_index}` : "",
+    location.command ? `命令 ${location.command}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function renderErrorDiagnostic(error, { compact = false } = {}) {
+  const detail = errorPayload(error);
+  const diagnostic = detail?.diagnostic || {};
+  const title = diagnostic.title || detail.code || "处理失败";
+  const actual = diagnostic.actual_error || detail.message || errorText(error);
+  const location = diagnostic.location || { step: detail.step };
+  const locationText = diagnosticLocationText(location) || detail.step || "未知阶段";
+  const solutions = Array.isArray(diagnostic.solutions) && diagnostic.solutions.length
+    ? diagnostic.solutions
+    : ["查看实际错误和项目日志，保留项目 ID 后按对应阶段排查。"];
+  const missing = location.missing_fields || location.missing;
+  const missingText = missing ? (Array.isArray(missing) ? missing.join(", ") : String(missing)) : "";
+  const retryLabel = diagnostic.retryable === false ? "需先修复配置或输入" : "修复后可重试";
+  if (compact) {
+    return `
+      <div class="batch-error-diagnostic">
+        <b>${escapeHtml(title)}</b>
+        <span class="mono">${escapeHtml(detail.code || "unknown_error")} · ${escapeHtml(locationText)}</span>
+        <p title="${escapeHtml(actual)}">${escapeHtml(textSnippet(actual, 260))}</p>
+        ${missingText ? `<p><strong>缺失：</strong>${escapeHtml(missingText)}</p>` : ""}
+        <details>
+          <summary>解决方案</summary>
+          <ol>${solutions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>
+        </details>
+      </div>
+    `;
+  }
+  return `
+    <div class="error-diagnostic" role="alert">
+      <div class="error-diagnostic-header">
+        <div><span>处理失败</span><h4>${escapeHtml(title)}</h4></div>
+        <span class="mini-pill status-error">${escapeHtml(retryLabel)}</span>
+      </div>
+      <div class="error-diagnostic-meta">
+        <div><span>错误码</span><code>${escapeHtml(detail.code || "unknown_error")}</code></div>
+        <div><span>错误位置</span><b>${escapeHtml(locationText)}</b></div>
+        ${missingText ? `<div><span>缺失字段/产物</span><code>${escapeHtml(missingText)}</code></div>` : ""}
+      </div>
+      <div class="error-diagnostic-block">
+        <b>实际错误</b>
+        <pre>${escapeHtml(actual)}</pre>
+      </div>
+      ${diagnostic.cause ? `<div class="error-diagnostic-block"><b>问题原因</b><p>${escapeHtml(diagnostic.cause)}</p></div>` : ""}
+      <div class="error-diagnostic-block">
+        <b>解决方案</b>
+        <ol>${solutions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>
+      </div>
+      <details class="error-raw-details">
+        <summary>查看完整错误详情</summary>
+        <pre>${escapeHtml(JSON.stringify(detail, null, 2))}</pre>
+      </details>
+    </div>
+  `;
 }
 
 function logMessageZh(message) {
@@ -1163,7 +1241,7 @@ function renderWorkbenchStatusCard() {
       </div>
       ${renderProgressSummary(status)}
       ${status.execution?.state === "queued" ? `<p class="small-text">当前队列位置：${Number(status.execution.queue_position || 0)}；可同时在其他窗口提交不同项目。</p>` : ""}
-      ${status.error ? errorState(errorText(status.error)) : ""}
+      ${status.error ? renderErrorDiagnostic(status.error) : ""}
       ${status.can_cancel ? `<button class="danger-button" data-action="cancel-project" data-project-id="${escapeHtml(state.activeProjectId)}" type="button">强制停止</button>` : ""}
       ${renderStatusTimeline(status)}
       ${renderProgressLogPanel(status)}
@@ -1252,7 +1330,7 @@ function renderAnalysisReadablePanel(detail) {
           <a class="ghost-button" href="/projects/${detail.projectId}" data-route="/projects/${detail.projectId}">详情</a>
         </div>
       </div>
-      ${detail.status.error ? errorState(errorText(detail.status.error)) : ""}
+      ${detail.status.error ? renderErrorDiagnostic(detail.status.error) : ""}
       ${renderWorkbenchMetadata(metadata, detail)}
       ${assets ? renderEditableAssets(assets) : emptyState("创作底稿尚未生成", "Analyze 完成后会生成 content-assets.json。")}
       ${transcript ? renderTranscriptSummary(transcript) : ""}
@@ -1541,7 +1619,7 @@ function renderCurrentTaskPanel() {
         </div>
       </div>
       <div class="panel-body stack">
-        ${state.activeStatus.error ? errorState(errorText(state.activeStatus.error)) : ""}
+        ${state.activeStatus.error ? renderErrorDiagnostic(state.activeStatus.error) : ""}
         ${renderStatusTimeline(state.activeStatus)}
       </div>
     </section>
@@ -1875,11 +1953,6 @@ async function renderBatches() {
   }
 }
 
-function batchItemError(item) {
-  const error = item?.error || {};
-  return error.message || error.details?.error || "";
-}
-
 function renderBatchDetailBody(batch) {
   const current = batch.items.find((item) => item.index === batch.current_index);
   return `
@@ -1911,13 +1984,13 @@ function renderBatchDetailBody(batch) {
             <tbody>
               ${batch.items.map((item) => `
                 <tr class="${item.index === batch.current_index ? "batch-current-row" : ""}">
-                  <td class="mono">${String(item.index).padStart(3, "0")}</td>
-                  <td><div class="truncate batch-url-cell" title="${escapeHtml(item.url)}">${escapeHtml(item.title || item.url)}</div></td>
-                  <td>${batchItemStatusPill(item.status)}</td>
-                  <td>${item.project_id ? `<a class="text-button mono" href="/projects/${item.project_id}" data-route="/projects/${item.project_id}">${escapeHtml(item.project_id)}</a>` : '<span class="muted">待创建</span>'}</td>
-                  <td>
+                  <td class="mono" data-label="顺序">${String(item.index).padStart(3, "0")}</td>
+                  <td data-label="视频"><div class="truncate batch-url-cell" title="${escapeHtml(item.url)}">${escapeHtml(item.title || item.url)}</div></td>
+                  <td data-label="阶段">${batchItemStatusPill(item.status)}</td>
+                  <td data-label="项目">${item.project_id ? `<a class="text-button mono" href="/projects/${item.project_id}" data-route="/projects/${item.project_id}">${escapeHtml(item.project_id)}</a>` : '<span class="muted">待创建</span>'}</td>
+                  <td data-label="文档 / 错误">
                     ${item.document_filename ? `<a class="text-button" href="/api/batches/${batch.batch_id}/documents/${encodeURIComponent(item.document_filename)}">${escapeHtml(item.document_filename)}</a>` : ""}
-                    ${item.error ? `<div class="small-text batch-error-text">${escapeHtml(batchItemError(item))}</div>` : ""}
+                    ${item.error ? renderErrorDiagnostic(item.error, { compact: true }) : ""}
                   </td>
                 </tr>
               `).join("")}
@@ -2058,7 +2131,7 @@ function renderDetailHero(detail) {
             </div>
             ${statusPill(detail.status.status, "", currentContentRoute(), detail.status)}
           </div>
-          ${detail.status.error ? errorState(errorText(detail.status.error)) : ""}
+          ${detail.status.error ? renderErrorDiagnostic(detail.status.error) : ""}
           ${warnings.length ? warningState(warnings.join(" / ")) : ""}
           <div class="meta-grid">
             <div class="meta-item"><span>项目 ID</span><b class="mono">${escapeHtml(detail.projectId)}</b></div>

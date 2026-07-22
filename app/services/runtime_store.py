@@ -20,6 +20,7 @@ from app.schemas.models import (
     ProjectStatus,
 )
 from app.services.config import settings
+from app.services.error_diagnostics import diagnose_error
 
 PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CANCEL_REQUEST_FILENAME = ".cancel-requested.json"
@@ -638,8 +639,14 @@ class ProjectStore:
                         "updated_at": record.updated_at,
                         "older_than_seconds": older_than_seconds,
                         "platform": record.target_platform,
+                        "existing_outputs": sorted(record.outputs),
+                        "worker_stdout_log": str(paths.project_dir / "logs" / "worker.out.log"),
+                        "worker_stderr_log": str(paths.project_dir / "logs" / "worker.err.log"),
+                        "service_stdout_log": str(self.runtime_dir / "logs" / "uvicorn.out.log"),
+                        "service_stderr_log": str(self.runtime_dir / "logs" / "uvicorn.err.log"),
                     },
                 }
+                error = diagnose_error(error)
                 recovered.append(
                     {
                         "project_id": record.project_id,
@@ -709,6 +716,7 @@ class ProjectStore:
             details = dict(error.get("details") or {})
             details.setdefault("platform", record.target_platform)
             error["details"] = details
+            error = diagnose_error(error)
             if paths.cancel_file().exists() and record.error and record.error.get("code") == "user_stopped":
                 return record
             record.status = ProjectStatus.failed

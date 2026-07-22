@@ -16,6 +16,11 @@ from app.services.errors import PipelineError
         ("This video is DRM protected", "drm_protected"),
         ("The read operation timed out", "yt_dlp_network_timeout"),
         ("Please update to the latest version of yt-dlp", "yt_dlp_update_required"),
+        ("HTTP Error 403: Forbidden while downloading API page", "yt_dlp_access_forbidden"),
+        ("HTTP Error 429: Too Many Requests", "yt_dlp_rate_limited"),
+        ("Unsupported URL: https://example.com/share/123", "yt_dlp_unsupported_url"),
+        ("Unable to extract video data; please report this issue", "yt_dlp_extractor_changed"),
+        ("Connection reset by peer", "yt_dlp_network_error"),
     ],
 )
 def test_ytdlp_errors_are_structurally_classified(tmp_path, message, code):

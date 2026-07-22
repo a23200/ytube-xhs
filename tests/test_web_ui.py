@@ -105,6 +105,10 @@ def test_web_ui_serves_required_controls_and_assets():
         "真实生成测试图",
         "yt_dlp_cookies_required",
         "平台要求使用最新浏览器 Cookie",
+        "renderErrorDiagnostic",
+        "实际错误",
+        "解决方案",
+        "错误位置",
         "密钥已配置",
         'aria-disabled="true"',
     ]:
@@ -169,5 +173,7 @@ def test_web_ui_serves_required_controls_and_assets():
         ".batch-layout",
         ".batch-progress",
         ".batch-current-row",
+        ".error-diagnostic",
+        ".batch-error-diagnostic",
     ]:
         assert required in css

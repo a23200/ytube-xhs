@@ -34,6 +34,7 @@ app/
     models.py
   services/
     diagnostics.py
+    error_diagnostics.py
     ingest.py
     transcript.py
     frame_extractor.py
@@ -171,6 +172,8 @@ python scripts/doctor.py --require-full
 ```
 
 默认模式只要求真实上游链路具备运行条件：`yt-dlp`/`ffmpeg` ingest、字幕时间轴和关键帧抽取。`--require-full` 会额外要求 Whisper fallback、OCR Provider 和 LLM 生成都 ready；适合正式跑 completed 验收前使用。诊断输出和 `/api/diagnostics` 一致，会包含 `ffmpeg`、`ffprobe`、`tesseract` 的路径和版本首行，但不会输出密钥明文。
+
+任务失败时，单项目和批量详情会显示错误码、错误阶段、代码组件、实际底层错误、缺失字段/产物和针对性解决方案。完整错误目录可通过 `GET /api/errors/catalog` 读取，人工排障表见 [`docs/error-troubleshooting.md`](docs/error-troubleshooting.md)。
 
 ## 启动
 

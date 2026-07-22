@@ -25,6 +25,7 @@ from app.services.batch_manager import batch_manager
 from app.services.batch_store import BATCH_TERMINAL_STATUSES, batch_store
 from app.services.contracts import validate_content_assets, validate_xhs_post
 from app.services.diagnostics import collect_diagnostics
+from app.services.error_diagnostics import diagnose_error, error_catalog
 from app.services.errors import PipelineError
 from app.services.image_card_renderer import render_image_cards
 from app.services.image_client import image_client
@@ -831,6 +832,11 @@ def list_platforms() -> dict:
     return {"platforms": public_platform_capabilities()}
 
 
+@router.get("/errors/catalog")
+def list_error_catalog() -> dict[str, Any]:
+    return {"errors": error_catalog()}
+
+
 def _get_existing_batch(batch_id: str):
     try:
         return batch_store.get(batch_id)
@@ -844,6 +850,10 @@ def _batch_response(record: Any) -> dict[str, Any]:
     progress_percent = round((processed / record.total_count) * 100) if record.total_count else 0
     paths = batch_store.paths(record.batch_id)
     payload = record.model_dump(mode="json")
+    payload["error"] = diagnose_error(payload["error"]) if payload.get("error") else None
+    for item in payload.get("items", []):
+        if item.get("error"):
+            item["error"] = diagnose_error(item["error"])
     payload.update(
         {
             "progress_percent": progress_percent,
@@ -1657,7 +1667,7 @@ def get_project_status(project_id: str) -> dict:
         "status_description": current_status_ui["description"],
         "updated_at": record.updated_at,
         "logs": [log.model_dump(mode="json") for log in record.logs],
-        "error": record.error,
+        "error": diagnose_error(record.error) if record.error else None,
         "outputs": record.outputs,
         "warnings": record.warnings,
         "progress": progress,

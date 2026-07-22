@@ -114,6 +114,11 @@ def test_health_and_diagnostics():
     assert "api_key" not in body["llm"]
     assert "api_key" not in body["image"]
 
+    catalog = client.get("/api/errors/catalog")
+    assert catalog.status_code == 200
+    catalog_codes = {item["code"] for item in catalog.json()["errors"]}
+    assert {"yt_dlp_failed", "llm_contract_invalid", "body_too_short"} <= catalog_codes
+
     doctor = client.get("/api/system/doctor")
     assert doctor.status_code == 200
     doctor_body = doctor.json()

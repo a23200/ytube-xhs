@@ -19,6 +19,7 @@ from app.schemas.models import (
     BatchStatus,
 )
 from app.services.config import settings
+from app.services.error_diagnostics import diagnose_error
 from app.services.runtime_store import read_json, utc_now, write_json
 
 BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -171,7 +172,7 @@ class BatchStore:
                 item.title = title
             if document_filename is not None:
                 item.document_filename = document_filename
-            item.error = error
+            item.error = diagnose_error(error) if error else None
             if status in {BatchItemStatus.analyzing, BatchItemStatus.producing}:
                 item.started_at = item.started_at or now
                 item.completed_at = None
@@ -217,6 +218,7 @@ class BatchStore:
             paths, record = self._read_locked(batch_id)
             if record.status == BatchStatus.stopped:
                 return record
+            error = diagnose_error(error)
             record.status = BatchStatus.failed
             record.current_index = None
             record.error = error

@@ -230,6 +230,27 @@ def test_write_xhs_post_rejects_empty_llm_payload_without_template_fallback(tmp_
     assert not (paths.analysis_dir / "xiaohongshu-post.json").exists()
 
 
+def test_write_xhs_post_repairs_missing_contract_fields_before_quality_check(tmp_path: Path, monkeypatch):
+    paths = ProjectPaths(tmp_path / "project")
+    paths.ensure()
+    responses = iter([{"body": "字段不完整"}, _post_with()])
+    calls = []
+
+    def fake_json_chat(*args, **kwargs):
+        calls.append((args, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(xhs_writer.llm_client, "json_chat", fake_json_chat)
+
+    payload = xhs_writer.write_xhs_post({}, _content_assets(), _keyframes(paths), {"frames": []}, "干货", paths)
+
+    assert len(calls) == 2
+    assert payload["body"].startswith("先保存证据")
+    repair_prompt = calls[1][0][0][1]["content"]
+    assert "Validation error" in repair_prompt
+    assert "missing_fields" in repair_prompt
+
+
 def test_write_toutiao_post_rejects_empty_llm_payload_without_template_fallback(tmp_path: Path, monkeypatch):
     paths = ProjectPaths(tmp_path / "project")
     paths.ensure()

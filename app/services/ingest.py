@@ -393,6 +393,73 @@ def _is_media_download_forbidden(message: str) -> bool:
     return "unable to download video data" in lowered and ("http error 403" in lowered or "forbidden" in lowered)
 
 
+def _is_access_forbidden(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "http error 403",
+            "403 forbidden",
+            "status code 403",
+            "http status 403",
+            "server returned 403",
+            "access denied",
+        )
+    )
+
+
+def _is_rate_limited(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "http error 429",
+            "429 too many requests",
+            "status code 429",
+            "http status 429",
+            "too many requests",
+            "rate limit",
+        )
+    )
+
+
+def _is_unsupported_url(message: str) -> bool:
+    lowered = message.lower()
+    return "unsupported url" in lowered or "no suitable extractor" in lowered
+
+
+def _is_extractor_changed(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "unable to extract",
+            "failed to extract",
+            "could not find",
+            "unable to parse",
+            "no video formats found",
+            "no media links found",
+        )
+    )
+
+
+def _is_network_connection_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "connection reset",
+            "connection refused",
+            "remote end closed connection",
+            "remote disconnected",
+            "temporary failure in name resolution",
+            "name or service not known",
+            "network is unreachable",
+            "nodename nor servname provided",
+        )
+    )
+
+
 def _is_requested_format_unavailable(message: str) -> bool:
     lowered = message.lower()
     return "requested format is not available" in lowered or "use --list-formats for a list of available formats" in lowered
@@ -717,6 +784,33 @@ def _raise_ingest_ytdlp_error(message: str, exc: Exception, url: str, language: 
             ),
             message,
         ) from exc
+    if _is_access_forbidden(message):
+        raise _yt_dlp_error(
+            "yt_dlp_access_forbidden",
+            (
+                "The platform returned HTTP 403 for a webpage, API, or media request. "
+                "Review details.error to identify the rejected request, then refresh cookies, update yt-dlp, or change network/IP."
+            ),
+            message,
+        ) from exc
+    if _is_rate_limited(message):
+        raise _yt_dlp_error(
+            "yt_dlp_rate_limited",
+            "The platform rate-limited yt-dlp. Pause requests, reduce concurrency, and retry from a stable browser/network session.",
+            message,
+        ) from exc
+    if _is_unsupported_url(message):
+        raise _yt_dlp_error(
+            "yt_dlp_unsupported_url",
+            "yt-dlp does not recognize this URL. Use the platform's canonical video detail URL and update yt-dlp before retrying.",
+            message,
+        ) from exc
+    if _is_extractor_changed(message):
+        raise _yt_dlp_error(
+            "yt_dlp_extractor_changed",
+            "yt-dlp could not extract the expected fields from the platform response. Update the extractor and review details.error.",
+            message,
+        ) from exc
     if _is_cookie_error(message):
         raise _yt_dlp_error(
             "yt_dlp_cookies_invalid",
@@ -727,6 +821,12 @@ def _raise_ingest_ytdlp_error(message: str, exc: Exception, url: str, language: 
         raise _yt_dlp_error(
             "yt_dlp_network_timeout",
             "The yt-dlp request timed out before the platform responded. Retry later or check the target Mac's network path.",
+            message,
+        ) from exc
+    if _is_network_connection_error(message):
+        raise _yt_dlp_error(
+            "yt_dlp_network_error",
+            "The platform connection failed before extraction completed. Check DNS, TLS, proxy, and the target Mac's network path.",
             message,
         ) from exc
     if _is_ytdlp_update_required(message):

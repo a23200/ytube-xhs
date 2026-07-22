@@ -18,10 +18,11 @@ class PipelineError(Exception):
         self.details = details or {}
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        from app.services.error_diagnostics import diagnose_error
+
+        return diagnose_error({
             "code": self.code,
             "message": self.message,
             "step": self.step,
             "details": self.details,
-        }
-
+        })

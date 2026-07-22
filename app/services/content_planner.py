@@ -9,6 +9,10 @@ from app.services.source_anchors import validate_content_asset_anchors
 from app.services.text_utils import clean_text
 
 MIN_VERBATIM_CHARS = 24
+CONTRACT_REPAIR_CODES = {"llm_contract_invalid", "source_anchor_invalid"}
+MAX_CONTRACT_REPAIRS = 2
+
+
 def _compact_transcript(transcript_payload: Dict[str, Any], max_segments: int = 160) -> List[Dict[str, Any]]:
     segments = transcript_payload.get("segments", [])
     if len(segments) <= max_segments:
@@ -200,6 +204,67 @@ def _validate_content_assets_payload(
     return payload
 
 
+def _repair_content_assets_contract(
+    payload: Dict[str, Any],
+    violation: PipelineError,
+    context: Dict[str, Any],
+    schema: Dict[str, Any],
+) -> Dict[str, Any]:
+    return llm_client.json_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "你是 JSON 产物修复器。请修复完整 content-assets.json，使它严格满足 schema 和 violation，"
+                    "不得删除必填字段，不得编造来源中不存在的事实、时间或路径。所有来源时间必须来自 transcript，"
+                    "所有帧路径必须来自 keyframes。保留已有正确内容，只修复缺失、类型和来源锚点问题，返回严格 JSON。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Schema:\n{json.dumps(schema, ensure_ascii=False)}\n\n"
+                    f"Validation error:\n{json.dumps(violation.to_dict(), ensure_ascii=False)}\n\n"
+                    f"Source context:\n{json.dumps(context, ensure_ascii=False)}\n\n"
+                    f"Draft JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+                ),
+            },
+        ],
+        step="planning_content",
+        temperature=0.0,
+    )
+
+
+def _validate_or_repair_content_assets(
+    payload: Dict[str, Any],
+    transcript_payload: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    paths: ProjectPaths,
+    *,
+    context: Dict[str, Any],
+    schema: Dict[str, Any],
+    max_repairs: int = MAX_CONTRACT_REPAIRS,
+) -> Dict[str, Any]:
+    current = payload
+    for repair_attempt in range(max_repairs + 1):
+        try:
+            return _validate_content_assets_payload(current, transcript_payload, keyframes_payload, paths)
+        except PipelineError as exc:
+            if exc.code not in CONTRACT_REPAIR_CODES:
+                raise
+            if repair_attempt >= max_repairs:
+                details = dict(exc.details)
+                details.update(
+                    {
+                        "repair_attempts": repair_attempt,
+                        "received_fields": sorted(current) if isinstance(current, dict) else [],
+                    }
+                )
+                raise PipelineError(exc.code, exc.message, exc.step, details) from exc
+            current = _repair_content_assets_contract(current, exc, context, schema)
+    raise RuntimeError("Unreachable content-assets contract repair state")
+
+
 def _rewrite_content_assets_for_verbatim(
     payload: Dict[str, Any],
     transcript_payload: Dict[str, Any],
@@ -251,6 +316,8 @@ def _guard_or_rewrite_content_assets(
     style: str,
     paths: ProjectPaths,
 ) -> Dict[str, Any]:
+    context = _content_assets_context(metadata, transcript_payload, keyframes_payload, visual_payload, language, style)
+    schema = _content_assets_schema()
     try:
         _guard_against_verbatim_copy(payload, transcript_payload)
         return payload
@@ -267,7 +334,14 @@ def _guard_or_rewrite_content_assets(
             style,
             exc,
         )
-        repaired = _validate_content_assets_payload(repaired, transcript_payload, keyframes_payload, paths)
+        repaired = _validate_or_repair_content_assets(
+            repaired,
+            transcript_payload,
+            keyframes_payload,
+            paths,
+            context=context,
+            schema=schema,
+        )
         _guard_against_verbatim_copy(repaired, transcript_payload)
         return repaired
 
@@ -482,7 +556,14 @@ def build_content_assets(
         step="planning_content",
         temperature=0.2,
     )
-    payload = _validate_content_assets_payload(payload, transcript_payload, keyframes_payload, paths)
+    payload = _validate_or_repair_content_assets(
+        payload,
+        transcript_payload,
+        keyframes_payload,
+        paths,
+        context=context,
+        schema=schema,
+    )
     payload = _guard_or_rewrite_content_assets(
         payload,
         transcript_payload,

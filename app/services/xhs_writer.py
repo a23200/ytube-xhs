@@ -11,6 +11,8 @@ from app.services.source_anchors import validate_xhs_post_anchors
 from app.services.text_utils import clean_text
 
 MIN_VERBATIM_CHARS = 24
+CONTRACT_REPAIR_CODES = {"llm_contract_invalid", "source_anchor_invalid"}
+MAX_CONTRACT_REPAIRS = 2
 VISIBLE_TEXT_FIELDS = ["cover_text", "hook", "body", "publish_suggestion"]
 XHS_POST_FIELDS = [
     "content_type",
@@ -477,6 +479,87 @@ def _validate_post_payload(
     return payload
 
 
+def _repair_post_contract(
+    payload: Dict[str, Any],
+    violation: PipelineError,
+    metadata: Dict[str, Any],
+    content_assets: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    style: str,
+    platform: str,
+    transcript_payload: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    prompt = PLATFORM_PROMPTS[platform]
+    return llm_client.json_chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    f"你是{prompt['name']}平台稿 JSON 修复器。修复完整 JSON，使它严格满足 schema 和 validation error。"
+                    "不得删除字段、降低字数与原创度要求、添加小标题或编造事实。只可使用 context 中的真实字幕时间和关键帧路径。"
+                    "保留已有正确内容，补齐缺失字段并修正类型或锚点，返回严格 JSON。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Schema:\n{json.dumps(_post_schema(), ensure_ascii=False)}\n\n"
+                    f"Validation error:\n{json.dumps(violation.to_dict(), ensure_ascii=False)}\n\n"
+                    f"Context:\n{json.dumps(_post_context(metadata, content_assets, keyframes_payload, visual_payload, style, transcript_payload), ensure_ascii=False)}\n\n"
+                    f"Draft JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+                ),
+            },
+        ],
+        step="writing_xhs",
+        temperature=0.0,
+    )
+
+
+def _validate_or_repair_post(
+    payload: Dict[str, Any],
+    metadata: Dict[str, Any],
+    content_assets: Dict[str, Any],
+    keyframes_payload: Dict[str, Any],
+    visual_payload: Dict[str, Any],
+    style: str,
+    paths: ProjectPaths,
+    *,
+    platform: str,
+    transcript_payload: Optional[Dict[str, Any]],
+    max_repairs: int = MAX_CONTRACT_REPAIRS,
+) -> Dict[str, Any]:
+    current = payload
+    for repair_attempt in range(max_repairs + 1):
+        try:
+            return _validate_post_payload(current, keyframes_payload, paths, platform=platform)
+        except PipelineError as exc:
+            if exc.code not in CONTRACT_REPAIR_CODES:
+                raise
+            if repair_attempt >= max_repairs:
+                details = dict(exc.details)
+                details.update(
+                    {
+                        "repair_attempts": repair_attempt,
+                        "received_fields": sorted(current) if isinstance(current, dict) else [],
+                        "platform": platform,
+                    }
+                )
+                raise PipelineError(exc.code, exc.message, exc.step, details) from exc
+            current = _repair_post_contract(
+                current,
+                exc,
+                metadata,
+                content_assets,
+                keyframes_payload,
+                visual_payload,
+                style,
+                platform,
+                transcript_payload,
+            )
+    raise RuntimeError("Unreachable platform post contract repair state")
+
+
 def _rewrite_post_for_quality(
     payload: Dict[str, Any],
     metadata: Dict[str, Any],
@@ -570,7 +653,17 @@ def _guard_or_rewrite_post(
             report,
             transcript_payload,
         )
-        current = _validate_post_payload(current, keyframes_payload, paths, platform=platform)
+        current = _validate_or_repair_post(
+            current,
+            metadata,
+            content_assets,
+            keyframes_payload,
+            visual_payload,
+            style,
+            paths,
+            platform=platform,
+            transcript_payload=transcript_payload,
+        )
     raise RuntimeError("Unreachable quality validation state")
 
 
@@ -657,7 +750,17 @@ def write_platform_post(
         )
     except PipelineError:
         raise
-    payload = _validate_post_payload(payload, keyframes_payload, paths, platform=platform)
+    payload = _validate_or_repair_post(
+        payload,
+        metadata,
+        content_assets,
+        keyframes_payload,
+        visual_payload,
+        style,
+        paths,
+        platform=platform,
+        transcript_payload=transcript_payload,
+    )
     payload, quality_report = _guard_or_rewrite_post(
         payload,
         metadata,

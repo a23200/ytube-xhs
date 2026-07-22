@@ -7,6 +7,7 @@ import time
 from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Optional
 
 from app.services.config import settings
@@ -214,18 +215,23 @@ class TaskManager:
         ]
         if job.kwargs:
             raise ValueError("Isolated pipeline jobs do not accept keyword arguments.")
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        child_processes.register(job.project_id, process)
-        try:
-            return_code = process.wait()
-        finally:
-            child_processes.unregister(job.project_id, process)
+        logs_dir = settings.runtime_dir / "projects" / job.project_id / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = logs_dir / "worker.out.log"
+        stderr_path = logs_dir / "worker.err.log"
+        with stdout_path.open("a", encoding="utf-8") as stdout_handle, stderr_path.open("a", encoding="utf-8") as stderr_handle:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                start_new_session=True,
+            )
+            child_processes.register(job.project_id, process)
+            try:
+                return_code = process.wait()
+            finally:
+                child_processes.unregister(job.project_id, process)
         if return_code != 0 and not job.cancelled.is_set():
             from app.schemas.models import ProjectStatus
             from app.services.runtime_store import store
@@ -249,9 +255,25 @@ class TaskManager:
                         "code": "worker_process_failed",
                         "message": "The isolated task worker exited unexpectedly.",
                         "step": record.status.value,
-                        "details": {"returncode": return_code, "scope": job.scope, "platform": job.platform},
+                        "details": {
+                            "returncode": return_code,
+                            "scope": job.scope,
+                            "platform": job.platform,
+                            "stdout_log": str(stdout_path),
+                            "stderr_log": str(stderr_path),
+                            "stdout": self._tail_text(stdout_path, 2000),
+                            "stderr": self._tail_text(stderr_path, 4000),
+                        },
                     },
                 )
+
+    @staticmethod
+    def _tail_text(path: Path, limit: int) -> str:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"Could not read {path}: {exc}"
+        return text[-limit:]
 
     def cancel(self, project_id: str) -> Dict[str, Any]:
         queued_cancelled = False

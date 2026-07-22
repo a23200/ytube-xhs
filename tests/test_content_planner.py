@@ -179,6 +179,34 @@ def test_build_content_assets_rejects_incomplete_llm_payload_without_template_fa
     assert not (paths.analysis_dir / "content-assets.json").exists()
 
 
+def test_build_content_assets_repairs_missing_contract_fields(tmp_path: Path, monkeypatch):
+    paths = _paths(tmp_path)
+    responses = iter([{"one_sentence_summary": "只有一句话"}, _content_assets()])
+    calls = []
+
+    def fake_json_chat(*args, **kwargs):
+        calls.append((args, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(content_planner.llm_client, "json_chat", fake_json_chat)
+
+    payload = content_planner.build_content_assets(
+        {},
+        _transcript(),
+        {"keyframes": []},
+        {"frames": []},
+        "zh",
+        "干货",
+        paths,
+    )
+
+    assert len(calls) == 2
+    assert payload["source_evidence"][0]["source_text"] == SOURCE_TEXT
+    repair_prompt = calls[1][0][0][1]["content"]
+    assert "missing_fields" in repair_prompt
+    assert "Draft JSON" in repair_prompt
+
+
 def test_build_content_assets_rejects_non_object_llm_payload(tmp_path: Path, monkeypatch):
     paths = _paths(tmp_path)
     monkeypatch.setattr(content_planner.llm_client, "json_chat", lambda *args, **kwargs: [])
