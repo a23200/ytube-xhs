@@ -8,6 +8,8 @@ def test_web_ui_serves_required_controls_and_assets():
 
     index = client.get("/")
     dashboard = client.get("/dashboard")
+    batches = client.get("/batches")
+    batch_detail = client.get("/batches/example-batch")
     project_detail = client.get("/projects/example-project")
     llm_settings = client.get("/settings/llm")
     runtime_settings = client.get("/settings/runtime")
@@ -16,6 +18,8 @@ def test_web_ui_serves_required_controls_and_assets():
 
     assert index.status_code == 200
     assert dashboard.status_code == 200
+    assert batches.status_code == 200
+    assert batch_detail.status_code == 200
     assert project_detail.status_code == 200
     assert llm_settings.status_code == 200
     assert runtime_settings.status_code == 200
@@ -35,6 +39,10 @@ def test_web_ui_serves_required_controls_and_assets():
     js = script.text
     for required in [
         'id="project-form"',
+        'id="batch-form"',
+        'id="batch-urls"',
+        'id="batch-target-platform"',
+        'id="start-batch-button"',
         'id="url"',
         'id="language"',
         'id="style"',
@@ -56,7 +64,13 @@ def test_web_ui_serves_required_controls_and_assets():
         "renderProgressLogPanel",
         "renderProjectTable",
         "renderProjectDetail",
+        "renderBatches",
+        "renderBatchDetail",
+        "renderBatchDetailBody",
         "生产工作台",
+        "批量队列",
+        "开始顺序处理",
+        "下载 Word 文件夹",
         "Multi-platform Content Workbench",
         "一键分析解析",
         "一键产出图文",
@@ -104,6 +118,8 @@ def test_web_ui_serves_required_controls_and_assets():
         "/api/settings/image",
         "/api/image/self-test",
         "/api/projects",
+        "/api/batches",
+        "/api/batches/${batchId}/cancel",
         "/status",
         "/verify",
         "/files/${kind}",
@@ -150,5 +166,8 @@ def test_web_ui_serves_required_controls_and_assets():
         ".tabs",
         ".frames-grid",
         ".diagnostic-matrix",
+        ".batch-layout",
+        ".batch-progress",
+        ".batch-current-row",
     ]:
         assert required in css

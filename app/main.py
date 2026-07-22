@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
+from app.services.batch_manager import batch_manager
 from app.services.config import BASE_DIR
 from app.services.runtime_store import store
 from app.services.task_manager import task_manager
@@ -14,12 +15,14 @@ from app.services.task_manager import task_manager
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     store.recover_interrupted_projects()
+    batch_manager.recover()
     yield
+    batch_manager.shutdown()
     task_manager.cancel_all()
 
 app = FastAPI(
     title="Video Link to Multi-platform Content Package",
-    version="0.2.0",
+    version="0.3.0",
     description="A real processing pipeline from authorized video URLs to platform-specific articles and export files.",
     lifespan=lifespan,
 )

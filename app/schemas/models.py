@@ -59,6 +59,88 @@ class ProjectImageGenerateRequest(BaseModel):
     style: Optional[str] = Field(default="clean", max_length=64)
 
 
+class BatchStatus(str, Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    completed_with_errors = "completed_with_errors"
+    stopped = "stopped"
+    failed = "failed"
+
+
+class BatchItemStatus(str, Enum):
+    pending = "pending"
+    analyzing = "analyzing"
+    producing = "producing"
+    completed = "completed"
+    failed = "failed"
+    stopped = "stopped"
+    skipped = "skipped"
+
+
+class BatchCreate(BaseModel):
+    urls: List[HttpUrl] = Field(min_length=1, max_length=50)
+    target_platform: TargetPlatform = "xhs"
+    language: str = Field(default="zh", min_length=2, max_length=16)
+    style: str = Field(default="干货", max_length=32)
+    use_whisper: bool = True
+    use_ocr: bool = False
+    text_only: bool = True
+    max_frames: int = Field(default=12, ge=8, le=20)
+    continue_on_error: bool = True
+
+
+class BatchItem(BaseModel):
+    index: int = Field(ge=1)
+    url: str
+    status: BatchItemStatus = BatchItemStatus.pending
+    project_id: Optional[str] = None
+    title: Optional[str] = None
+    document_filename: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class BatchLog(BaseModel):
+    time: str
+    status: BatchStatus
+    message: str
+    details: Optional[Dict[str, Any]] = None
+
+
+class BatchRecord(BaseModel):
+    batch_id: str
+    target_platform: TargetPlatform
+    language: str
+    style: str
+    use_whisper: bool
+    use_ocr: bool
+    text_only: bool
+    max_frames: int
+    continue_on_error: bool
+    status: BatchStatus
+    created_at: str
+    updated_at: str
+    current_index: Optional[int] = None
+    total_count: int = 0
+    completed_count: int = 0
+    failed_count: int = 0
+    stopped_count: int = 0
+    skipped_count: int = 0
+    document_count: int = 0
+    items: List[BatchItem] = Field(default_factory=list)
+    logs: List[BatchLog] = Field(default_factory=list)
+    error: Optional[Dict[str, Any]] = None
+
+
+class BatchCreated(BaseModel):
+    batch_id: str
+    status: BatchStatus
+    total_count: int
+    queue_position: int = 0
+
+
 class ProgressLog(BaseModel):
     time: str
     status: ProjectStatus

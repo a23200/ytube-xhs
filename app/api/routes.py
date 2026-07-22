@@ -10,6 +10,8 @@ from fastapi.responses import FileResponse, Response
 
 from app.schemas.models import (
     FILE_KIND_TO_PATH,
+    BatchCreate,
+    BatchCreated,
     ImageSettingsUpdate,
     LLMSettingsUpdate,
     ProjectCreate,
@@ -19,6 +21,8 @@ from app.schemas.models import (
     ProjectStatus,
 )
 from app.services.article_quality import evaluate_article_quality, quality_error
+from app.services.batch_manager import batch_manager
+from app.services.batch_store import BATCH_TERMINAL_STATUSES, batch_store
 from app.services.contracts import validate_content_assets, validate_xhs_post
 from app.services.diagnostics import collect_diagnostics
 from app.services.errors import PipelineError
@@ -825,6 +829,104 @@ def image_self_test(real: bool = False) -> dict:
 @router.get("/platforms")
 def list_platforms() -> dict:
     return {"platforms": public_platform_capabilities()}
+
+
+def _get_existing_batch(batch_id: str):
+    try:
+        return batch_store.get(batch_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Batch not found") from exc
+
+
+def _batch_response(record: Any) -> dict[str, Any]:
+    execution = batch_manager.snapshot(record.batch_id)
+    processed = record.completed_count + record.failed_count + record.stopped_count + record.skipped_count
+    progress_percent = round((processed / record.total_count) * 100) if record.total_count else 0
+    paths = batch_store.paths(record.batch_id)
+    payload = record.model_dump(mode="json")
+    payload.update(
+        {
+            "progress_percent": progress_percent,
+            "processed_count": processed,
+            "can_cancel": record.status not in BATCH_TERMINAL_STATUSES,
+            "download_ready": record.document_count > 0,
+            "output_directory": str(paths.documents_dir),
+            "execution": execution,
+        }
+    )
+    return payload
+
+
+@router.post("/batches", response_model=BatchCreated)
+def create_batch(request: BatchCreate) -> BatchCreated:
+    try:
+        llm_client.ensure_available("producing_article")
+    except PipelineError as exc:
+        raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
+    record = batch_store.create(request)
+    queued = batch_manager.submit(record.batch_id)
+    current = batch_store.get(record.batch_id)
+    return BatchCreated(
+        batch_id=current.batch_id,
+        status=current.status,
+        total_count=current.total_count,
+        queue_position=queued["queue_position"],
+    )
+
+
+@router.get("/batches")
+def list_batches() -> list[dict[str, Any]]:
+    return [_batch_response(record) for record in batch_store.list()]
+
+
+@router.get("/batches/{batch_id}")
+def get_batch(batch_id: str) -> dict[str, Any]:
+    return _batch_response(_get_existing_batch(batch_id))
+
+
+@router.post("/batches/{batch_id}/cancel")
+def cancel_batch(batch_id: str) -> dict[str, Any]:
+    _get_existing_batch(batch_id)
+    result = batch_manager.cancel(batch_id)
+    return {
+        "batch": _batch_response(result["batch"]),
+        "project_cancelled": result["project_cancelled"],
+    }
+
+
+@router.get("/batches/{batch_id}/download")
+def download_batch_documents(batch_id: str):
+    record = _get_existing_batch(batch_id)
+    if record.document_count < 1:
+        raise HTTPException(status_code=404, detail="No batch Word documents are available yet")
+    try:
+        archive_path = batch_store.build_archive(batch_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        archive_path,
+        filename=f"batch-{batch_id}-documents.zip",
+        media_type="application/zip",
+    )
+
+
+@router.get("/batches/{batch_id}/documents/{filename}")
+def download_batch_document(batch_id: str, filename: str):
+    record = _get_existing_batch(batch_id)
+    registered = {item.document_filename for item in record.items if item.document_filename}
+    if filename not in registered:
+        raise HTTPException(status_code=404, detail="Batch document not found")
+    try:
+        document_path = batch_store.document_path(batch_id, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Batch document not found") from exc
+    if not document_path.exists():
+        raise HTTPException(status_code=404, detail="Batch document not found")
+    return FileResponse(
+        document_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
 
 def _queue_details(project_id: str, scope: str, platform: Optional[str], position: int) -> None:

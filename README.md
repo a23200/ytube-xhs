@@ -4,6 +4,8 @@
 
 视频链接 → 一键分析解析 → 可编辑内容资产 → 选择小红书 / 今日头条 / 抖音 / 哔哩哔哩 → 文章质量校验与定向重写 → JSON / Markdown / Word 下载
 
+批量队列支持一次粘贴最多 50 条视频链接，严格按输入顺序逐条执行完整的 Analyze → Produce 链路。每条成功后才开始下一条，Word 会按 `001-标题.docx` 顺序集中写入批次文件夹，并可整体下载 ZIP。
+
 小红书和今日头条还可继续调用独立生图 API 渲染 PNG 图文卡片。抖音和哔哩哔哩当前支持合法来源分析、平台格式生成和文件导出；没有接入自动发布，不会用模拟接口冒充官方发布能力。
 
 ## 合规边界
@@ -41,6 +43,8 @@ app/
     xhs_writer.py
     article_quality.py
     docx_writer.py
+    batch_store.py
+    batch_manager.py
     task_manager.py
     image_prompt_writer.py
     image_card_renderer.py
@@ -54,6 +58,7 @@ app/
     app.js
 runtime/
   projects/
+  batches/
 tests/
 requirements.txt
 requirements-optional.txt
@@ -151,6 +156,8 @@ YTXHS_MAX_PRODUCE_WORKERS=3
 
 每个任务运行在独立进程组中。强制停止只终止目标任务及其 yt-dlp、ffmpeg、Whisper 子进程，并立即释放队列槽位；服务重启会把遗留运行态项目生成 truthful partial package 后标记失败，供查看或重跑。
 项目状态 JSON 使用原子替换和按项目跨进程文件锁，Web 状态读取不会看到半写入文件；不同项目不共享全局业务锁，可继续并行更新。
+
+批量队列在现有任务池上增加了一层持久化顺序调度：单个批次同一时间只处理一条视频，必须等该视频的 Word 成功归档或明确失败后才进入下一条。批次记录写入 `runtime/batches/{batch_id}/batch.json`，文档集中写入 `runtime/batches/{batch_id}/documents/`。服务重启会读取未完成批次；已有 `analysis_completed` 项目会继续 Produce，已完成项目会补归档，中断中的单项按结构化失败记录后继续后续链接。停止批次会同时停止当前项目，待处理链接不会再创建项目。默认 `continue_on_error=true`，单条失败会保留错误并继续下一条。
 
 如果只需要“提取视频文案 → 基于文案解析 → 产出文章”，可启用 `text_only=true`（Web UI 默认勾选“仅提取文案/字幕”）。纯文案模式会优先使用真实字幕；找到可用字幕时会跳过媒体下载，不抽关键帧、不 OCR、不生成截图、不生成图片提示词和 PNG 卡片，只输出解析底稿与平台文章。
 
@@ -465,6 +472,40 @@ curl "http://127.0.0.1:8012/api/image/self-test?real=true"
   "target_platform": "toutiao"
 }
 ```
+
+### POST `/api/batches`
+
+创建一个自动完成 Analyze → 目标平台 Produce → Word 归档的顺序批次。批次最多包含 50 条 URL；需要提前配置可用 LLM。默认使用纯文案模式，避免抽帧、OCR 和图片生成。
+
+```json
+{
+  "urls": [
+    "https://www.youtube.com/watch?v=...",
+    "https://www.bilibili.com/video/...",
+    "https://www.douyin.com/video/..."
+  ],
+  "target_platform": "toutiao",
+  "language": "zh",
+  "style": "干货",
+  "use_whisper": true,
+  "use_ocr": false,
+  "text_only": true,
+  "max_frames": 12,
+  "continue_on_error": true
+}
+```
+
+返回 `batch_id`、批次状态、总条数和队列位置。相关接口：
+
+```text
+GET  /api/batches
+GET  /api/batches/{batch_id}
+POST /api/batches/{batch_id}/cancel
+GET  /api/batches/{batch_id}/download
+GET  /api/batches/{batch_id}/documents/{filename}
+```
+
+批次完成态分为 `completed` 和 `completed_with_errors`。后者表示部分链接失败，但成功文档仍可下载。ZIP 内保持 `documents/` 文件夹结构，并包含 `batch-summary.json`，记录每条 URL、对应项目、错误和文档名。
 
 ### POST `/api/projects/analyze`
 
@@ -899,6 +940,7 @@ python scripts/verify_project.py runtime/projects/{project_id} --require-complet
 - OpenAI-compatible LLM Provider，支持可配置超时/重试、JSON 解析修复，以及鉴权、限流、超时、网络、HTTP、响应结构错误的脱敏分类。
 - `POST /api/projects/analyze` 两步式解析入口：不依赖 LLM，产出可读解析和可编辑 `content-assets.json`。
 - `POST /api/projects/{id}/produce/platform/{platform}` 统一文章产出入口：依赖真实 LLM，四个平台分别产出 JSON、Markdown、Word 和质量报告；兼容的小红书/头条入口仍保留。
+- `POST /api/batches` 批量顺序入口：一次提交多条视频链接，逐条完成 Analyze 和 Produce，把各视频 Word 集中输出到批次文件夹，支持进度查询、停止、失败继续和 ZIP 下载。
 - `POST /api/projects/{id}/generate-images` 独立生图入口：读取已生成文章、图片提示词和关键帧，调用 `ImageCardRenderer` 渲染 PNG 卡片。
 - `ImageCardRenderer` 默认使用 Pillow 后端模板生成 1080x1350、4:5 的 `cover.png`、`slide_*.png`、`summary.png`；如果启用 `XHS_IMAGE_ENABLED=true`，会先请求外部 OpenAI-compatible Images API 生成原创底图，再做本地版式合成。
 - LLM 下游产物有结构合约校验：核心观点必须有证据，图片计划必须绑定来源帧或内容点，图片提示词必须包含构图、参考和负向提示词字段。
@@ -929,4 +971,4 @@ python scripts/verify_project.py runtime/projects/{project_id} --require-complet
 - 增加视觉模型 Provider，用关键帧生成更强的画面摘要和物体识别。
 - 增加本地 Ollama / vLLM Provider。
 - 增加字幕语言选择和多字幕合并。
-- 增加项目清理、重跑单步、批量导出和团队审稿流。
+- 增加项目清理、重跑单步和团队审稿流。

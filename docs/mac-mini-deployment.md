@@ -1,6 +1,6 @@
 # Mac mini 独立生产部署方案
 
-目标：在另一台 Mac mini 上作为独立项目运行，不依赖 Codex、开发机、浏览器自动化或其他辅助软件。服务由 `launchd` 托管，异常退出自动拉起，产物写入本机 `runtime/`。
+目标：在另一台 Mac mini 上作为独立项目运行，不依赖 Codex、开发机、浏览器自动化或其他辅助软件。服务由 `launchd` 托管，异常退出自动拉起，单项目与批量队列产物都写入本机 `runtime/`。
 
 ## 1. 推荐机器准备
 
@@ -93,6 +93,7 @@ sudo deploy/macos/install_macos.sh \
 - 安装/检查 `ffmpeg`、`tesseract`、`tesseract-lang`
 - 创建 `/opt/ytube-xhs/.env`
 - 创建 `runtime/logs`
+- 创建并持久化 `runtime/projects` 与 `runtime/batches` 业务产物目录
 - 注册主服务 LaunchDaemon：`com.ytube-xhs.service`，开机自启并异常退出自动拉起
 - 注册启动自检/自恢复 LaunchDaemon：`com.ytube-xhs.bootcheck`，开机和每 5 分钟检查依赖、拉起服务、健康检查，失败时自动重启服务
 
@@ -236,6 +237,14 @@ sudo /opt/ytube-xhs/deploy/macos/manage.sh recover
 ```text
 /opt/ytube-xhs/runtime/projects/
 ```
+
+批量队列会按输入顺序逐条生成 Word，集中保存到：
+
+```text
+/opt/ytube-xhs/runtime/batches/{batch_id}/documents/
+```
+
+每个批次同时保存 `batch.json` 和 `documents/batch-summary.json`。Web 的“批量队列”页面可停止当前批次、查看每条视频对应项目，并下载包含全部成功 Word 的 ZIP。更新脚本保留整个 `runtime/`，不会删除未完成批次或已生成文档；服务重启后会重新排入未完成批次，保留已成功文档，中断中的单项标记失败后继续后续链接。
 
 ## 8. 防故障建议
 

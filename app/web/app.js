@@ -310,6 +310,25 @@ const CONTENT_ROUTES = {
   },
 };
 
+const BATCH_STATUS_META = {
+  queued: { label: "等待执行", hint: "批次已进入顺序队列" },
+  running: { label: "顺序处理中", hint: "当前只处理一条视频" },
+  completed: { label: "全部完成", hint: "全部 Word 文档已输出" },
+  completed_with_errors: { label: "部分完成", hint: "部分链接失败，其余文档已输出" },
+  stopped: { label: "已停止", hint: "批次已由用户停止" },
+  failed: { label: "批次失败", hint: "批次调度器异常终止" },
+};
+
+const BATCH_ITEM_STATUS_META = {
+  pending: "等待处理",
+  analyzing: "解析视频",
+  producing: "生成文章",
+  completed: "Word 已完成",
+  failed: "处理失败",
+  stopped: "已停止",
+  skipped: "已跳过",
+};
+
 const sessionProjectId = window.sessionStorage.getItem("xhs.activeProjectId") || window.localStorage.getItem("xhs.activeProjectId") || "";
 const sessionContentRoute = window.sessionStorage.getItem("xhs.activeContentRoute") || window.localStorage.getItem("xhs.activeContentRoute") || "xhs";
 if (sessionProjectId) window.sessionStorage.setItem("xhs.activeProjectId", sessionProjectId);
@@ -333,6 +352,9 @@ const state = {
   pendingImageGenerationProjectId: "",
   pendingImageGenerationRoute: "",
   modalFrames: [],
+  batches: [],
+  batchDetail: null,
+  batchPollTimer: null,
 };
 
 function escapeHtml(value) {
@@ -357,6 +379,29 @@ function statusClass(status) {
   if (["failed", "stopped"].includes(status)) return "status-error";
   if (!status) return "";
   return `status-${String(status).replace(/[^a-z0-9_-]/gi, "")}`;
+}
+
+function batchStatusClass(status) {
+  if (status === "completed") return "status-ok";
+  if (status === "completed_with_errors") return "status-warning";
+  if (["stopped", "failed"].includes(status)) return "status-error";
+  return "status-producing_article";
+}
+
+function batchStatusPill(status) {
+  const meta = BATCH_STATUS_META[status] || { label: status || "未知状态" };
+  return `<span class="status-pill ${batchStatusClass(status)}">${escapeHtml(meta.label)}</span>`;
+}
+
+function batchItemStatusPill(status) {
+  const className = status === "completed"
+    ? "status-ok"
+    : (["failed", "stopped", "skipped"].includes(status) ? "status-error" : "status-producing_article");
+  return `<span class="status-pill ${className}">${escapeHtml(BATCH_ITEM_STATUS_META[status] || status || "未知")}</span>`;
+}
+
+function isBatchRunning(status) {
+  return ["queued", "running"].includes(status);
 }
 
 function platformFromDetails(details) {
@@ -657,6 +702,16 @@ function routeInfo() {
   const path = window.location.pathname === "/" ? "/dashboard" : window.location.pathname;
   const params = new URLSearchParams(window.location.search);
   if (path === "/dashboard") return { name: "dashboard", title: "生产工作台", mark: "台", tab: params.get("tab") };
+  if (path === "/batches") return { name: "batches", title: "批量队列", mark: "列" };
+  const batchMatch = path.match(/^\/batches\/([^/]+)$/);
+  if (batchMatch) {
+    return {
+      name: "batch-detail",
+      title: "批次详情",
+      mark: "列",
+      batchId: decodeURIComponent(batchMatch[1]),
+    };
+  }
   if (path === "/projects") return { name: "projects", title: "历史项目", mark: "项", tab: params.get("tab") };
   const detailMatch = path.match(/^\/projects\/([^/]+)$/);
   if (detailMatch) {
@@ -681,6 +736,7 @@ function navigate(path) {
 function currentNavClass(name) {
   const route = routeInfo();
   if (name === "dashboard" && route.name === "dashboard") return "active";
+  if (name === "batches" && ["batches", "batch-detail"].includes(route.name)) return "active";
   if (name === "projects" && ["projects", "project-detail"].includes(route.name)) return "active";
   if (name === "llm" && route.name === "llm") return "active";
   if (name === "runtime" && route.name === "runtime") return "active";
@@ -703,6 +759,9 @@ function shell({ title, subtitle, mark, actions = "", body = "" }) {
           <div class="nav-title">工作区</div>
           <a class="nav-link ${currentNavClass("dashboard")}" href="/dashboard" data-route="/dashboard">
             <span class="nav-mark">台</span><span>生产工作台</span>
+          </a>
+          <a class="nav-link ${currentNavClass("batches")}" href="/batches" data-route="/batches">
+            <span class="nav-mark">列</span><span>批量队列</span>
           </a>
           <a class="nav-link ${currentNavClass("projects")}" href="/projects" data-route="/projects">
             <span class="nav-mark">项</span><span>历史项目</span>
@@ -788,6 +847,18 @@ async function loadProjects() {
   state.projects = [...projects].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   await hydrateProjectSummaries(state.projects.slice(0, 30));
   return state.projects;
+}
+
+async function loadBatches() {
+  const batches = await apiGet("/api/batches");
+  state.batches = [...batches].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return state.batches;
+}
+
+async function loadBatch(batchId) {
+  const batch = await apiGet(`/api/batches/${batchId}`);
+  state.batchDetail = batch;
+  return batch;
 }
 
 async function hydrateProjectSummaries(projects) {
@@ -1659,6 +1730,233 @@ function renderProjectRoutePills(outputs) {
   return ready.map((route) => `<span class="mini-pill status-ok">${escapeHtml(route.shortLabel)}</span>`).join(" ");
 }
 
+function renderBatchCreateForm() {
+  return `
+    <section class="panel batch-create-panel">
+      <div class="panel-header">
+        <div>
+          <h3>新建顺序队列</h3>
+          <p>按输入顺序逐条完成解析、文章生成和 Word 归档。</p>
+        </div>
+      </div>
+      <div class="panel-body">
+        <form id="batch-form" class="form-grid">
+          <label class="field">
+            视频链接
+            <textarea id="batch-urls" name="urls" rows="10" placeholder="每行一个视频链接" required></textarea>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              文章平台
+              <select id="batch-target-platform" name="target_platform">
+                ${Object.values(CONTENT_ROUTES).map((route) => `<option value="${route.key}">${escapeHtml(route.label)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="field">
+              内容风格
+              <select id="batch-style" name="style">
+                <option value="干货">干货</option>
+                <option value="教程">教程</option>
+                <option value="测评">测评</option>
+                <option value="观点">观点</option>
+                <option value="清单">清单</option>
+              </select>
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="field">
+              语言
+              <select id="batch-language" name="language">
+                <option value="zh">zh</option>
+                <option value="en">en</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+            <label class="field">
+              最大关键帧数量
+              <input id="batch-max-frames" name="max_frames" type="number" min="8" max="20" value="12" disabled />
+            </label>
+          </div>
+          <div class="check-row">
+            <label class="check-field">
+              <input id="batch-text-only" name="text_only" type="checkbox" checked />
+              <span>纯文案模式</span>
+            </label>
+            <label class="check-field">
+              <input id="batch-use-whisper" name="use_whisper" type="checkbox" checked />
+              <span>无字幕时启用 Whisper</span>
+            </label>
+            <label class="check-field">
+              <input id="batch-use-ocr" name="use_ocr" type="checkbox" disabled />
+              <span>启用 OCR</span>
+            </label>
+            <label class="check-field">
+              <input id="batch-continue-on-error" name="continue_on_error" type="checkbox" checked />
+              <span>单条失败后继续</span>
+            </label>
+          </div>
+          <button id="start-batch-button" class="button" type="submit">开始顺序处理</button>
+          <div id="batch-create-error"></div>
+        </form>
+      </div>
+    </section>
+  `;
+}
+
+function renderBatchTable(batches) {
+  if (!batches.length) return emptyState("暂无批量队列", "输入多条视频链接后开始第一个批次。");
+  return `
+    <div class="table-wrap">
+      <table class="data-table batch-table">
+        <thead><tr><th>批次</th><th>平台</th><th>进度</th><th>状态</th><th>文档</th><th>操作</th></tr></thead>
+        <tbody>
+          ${batches.map((batch) => `
+            <tr>
+              <td>
+                <a class="text-button mono" href="/batches/${batch.batch_id}" data-route="/batches/${batch.batch_id}">${escapeHtml(batch.batch_id)}</a>
+                <div class="small-text">${escapeHtml(safeDate(batch.created_at))}</div>
+              </td>
+              <td>${escapeHtml(CONTENT_ROUTES[batch.target_platform]?.label || batch.target_platform)}</td>
+              <td>
+                <b>${Number(batch.processed_count || 0)} / ${Number(batch.total_count || 0)}</b>
+                <div class="small-text">成功 ${Number(batch.completed_count || 0)} · 失败 ${Number(batch.failed_count || 0)}</div>
+              </td>
+              <td>${batchStatusPill(batch.status)}</td>
+              <td>${Number(batch.document_count || 0)} 个 Word</td>
+              <td>
+                <div class="row wrap">
+                  <a class="ghost-button" href="/batches/${batch.batch_id}" data-route="/batches/${batch.batch_id}">查看</a>
+                  ${batch.download_ready ? `<a class="ghost-button" href="/api/batches/${batch.batch_id}/download">下载</a>` : ""}
+                  ${batch.can_cancel ? `<button class="danger-button" data-action="cancel-batch" data-batch-id="${batch.batch_id}" type="button">停止</button>` : ""}
+                </div>
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderBatchListPanel() {
+  return `
+    <section id="batch-list-panel" class="panel">
+      <div class="panel-header">
+        <div>
+          <h3>批次记录</h3>
+          <p>队列、单条失败和 Word 输出均持久化到 runtime。</p>
+        </div>
+      </div>
+      <div class="panel-body">${renderBatchTable(state.batches)}</div>
+    </section>
+  `;
+}
+
+async function renderBatches() {
+  shell({
+    title: "批量队列",
+    mark: "列",
+    subtitle: "多条视频按顺序解析并生成 Word 文档。",
+    actions: `<button class="ghost-button" data-action="refresh-batches" type="button">刷新</button>`,
+    body: `<div class="grid two">${renderBatchCreateForm()}${loadingPanel("批次记录")}</div>`,
+  });
+  try {
+    await Promise.all([loadBatches(), apiGet("/api/settings/llm").then((value) => { state.llmSettings = value; }).catch(() => null)]);
+    shell({
+      title: "批量队列",
+      mark: "列",
+      subtitle: "多条视频按顺序解析并生成 Word 文档。",
+      actions: `<button class="ghost-button" data-action="refresh-batches" type="button">刷新</button>`,
+      body: `<div class="grid two batch-layout">${renderBatchCreateForm()}${renderBatchListPanel()}</div>`,
+    });
+    if (state.batches.some((batch) => isBatchRunning(batch.status))) startBatchPolling();
+  } catch (error) {
+    shell({ title: "批量队列", mark: "列", subtitle: "批次记录读取失败。", body: errorState(errorText(error)) });
+  }
+}
+
+function batchItemError(item) {
+  const error = item?.error || {};
+  return error.message || error.details?.error || "";
+}
+
+function renderBatchDetailBody(batch) {
+  const current = batch.items.find((item) => item.index === batch.current_index);
+  return `
+    <div id="batch-detail-body" class="stack">
+      <section class="panel pad">
+        <div class="row between wrap">
+          <div>
+            <div class="progress-eyebrow">${escapeHtml(CONTENT_ROUTES[batch.target_platform]?.label || batch.target_platform)} · ${Number(batch.total_count || 0)} 条视频</div>
+            <h3 class="batch-title">${escapeHtml(batch.batch_id)}</h3>
+            <p class="muted">${escapeHtml(BATCH_STATUS_META[batch.status]?.hint || "")}</p>
+          </div>
+          ${batchStatusPill(batch.status)}
+        </div>
+        <div class="progress-bar batch-progress"><span class="progress-fill" style="width: ${Math.max(0, Math.min(100, Number(batch.progress_percent || 0)))}%"></span></div>
+        <div class="progress-metrics">
+          <div><span>总进度</span><b>${Number(batch.processed_count || 0)} / ${Number(batch.total_count || 0)}</b></div>
+          <div><span>当前任务</span><b>${current ? `${current.index}. ${BATCH_ITEM_STATUS_META[current.status] || current.status}` : "无"}</b></div>
+          <div><span>Word 文档</span><b>${Number(batch.document_count || 0)}</b></div>
+        </div>
+        <div class="batch-output-path"><span>输出目录</span><code>${escapeHtml(batch.output_directory || "")}</code></div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div><h3>视频处理顺序</h3><p>上一条完成或失败后，才会进入下一条。</p></div>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table batch-items-table">
+            <thead><tr><th>顺序</th><th>视频</th><th>阶段</th><th>项目</th><th>文档 / 错误</th></tr></thead>
+            <tbody>
+              ${batch.items.map((item) => `
+                <tr class="${item.index === batch.current_index ? "batch-current-row" : ""}">
+                  <td class="mono">${String(item.index).padStart(3, "0")}</td>
+                  <td><div class="truncate batch-url-cell" title="${escapeHtml(item.url)}">${escapeHtml(item.title || item.url)}</div></td>
+                  <td>${batchItemStatusPill(item.status)}</td>
+                  <td>${item.project_id ? `<a class="text-button mono" href="/projects/${item.project_id}" data-route="/projects/${item.project_id}">${escapeHtml(item.project_id)}</a>` : '<span class="muted">待创建</span>'}</td>
+                  <td>
+                    ${item.document_filename ? `<a class="text-button" href="/api/batches/${batch.batch_id}/documents/${encodeURIComponent(item.document_filename)}">${escapeHtml(item.document_filename)}</a>` : ""}
+                    ${item.error ? `<div class="small-text batch-error-text">${escapeHtml(batchItemError(item))}</div>` : ""}
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+async function renderBatchDetail(batchId) {
+  shell({
+    title: "批次详情",
+    mark: "列",
+    subtitle: batchId,
+    actions: `<a class="ghost-button" href="/batches" data-route="/batches">返回队列</a>`,
+    body: loadingPanel("批次详情"),
+  });
+  try {
+    const batch = await loadBatch(batchId);
+    const actions = `
+      <a class="ghost-button" href="/batches" data-route="/batches">返回队列</a>
+      ${batch.download_ready ? `<a class="button" href="/api/batches/${batch.batch_id}/download">下载 Word 文件夹</a>` : ""}
+      ${batch.can_cancel ? `<button class="danger-button" data-action="cancel-batch" data-batch-id="${batch.batch_id}" type="button">停止批次</button>` : ""}
+    `;
+    shell({
+      title: "批次详情",
+      mark: "列",
+      subtitle: `${batch.batch_id} · ${BATCH_STATUS_META[batch.status]?.label || batch.status}`,
+      actions,
+      body: renderBatchDetailBody(batch),
+    });
+    if (isBatchRunning(batch.status)) startBatchPolling(batchId);
+  } catch (error) {
+    shell({ title: "批次详情", mark: "列", subtitle: batchId, body: errorState(errorText(error)) });
+  }
+}
+
 async function renderProjects() {
   shell({
     title: "历史项目",
@@ -2289,6 +2587,8 @@ async function renderRoute() {
   await refreshHealth();
   const route = routeInfo();
   if (route.name === "dashboard") return renderDashboard();
+  if (route.name === "batches") return renderBatches();
+  if (route.name === "batch-detail") return renderBatchDetail(route.batchId);
   if (route.name === "projects") return renderProjects();
   if (route.name === "project-detail") return renderProjectDetail(route.projectId);
   if (route.name === "llm") return renderLlmSettings();
@@ -2350,6 +2650,35 @@ function stopPolling() {
     window.clearInterval(state.pollTimer);
     state.pollTimer = null;
   }
+  if (state.batchPollTimer) {
+    window.clearInterval(state.batchPollTimer);
+    state.batchPollTimer = null;
+  }
+}
+
+function startBatchPolling(batchId = "") {
+  if (state.batchPollTimer) window.clearInterval(state.batchPollTimer);
+  state.batchPollTimer = window.setInterval(async () => {
+    try {
+      if (batchId) {
+        const batch = await loadBatch(batchId);
+        if (!isBatchRunning(batch.status)) {
+          stopPolling();
+          await renderBatchDetail(batchId);
+          return;
+        }
+        const body = document.querySelector("#batch-detail-body");
+        if (body) body.outerHTML = renderBatchDetailBody(batch);
+        return;
+      }
+      await loadBatches();
+      const panel = document.querySelector("#batch-list-panel");
+      if (panel) panel.outerHTML = renderBatchListPanel();
+      if (!state.batches.some((batch) => isBatchRunning(batch.status))) stopPolling();
+    } catch {
+      stopPolling();
+    }
+  }, 1800);
 }
 
 async function submitProject(form) {
@@ -2381,6 +2710,66 @@ async function submitProject(form) {
   } finally {
     submitButton.disabled = false;
     submitButton.textContent = "一键分析解析";
+  }
+}
+
+function syncBatchTextOnlyControls(form) {
+  if (!form) return;
+  const textOnly = Boolean(form.elements.text_only?.checked);
+  const maxFrames = form.elements.max_frames;
+  const useOcr = form.elements.use_ocr;
+  if (maxFrames) maxFrames.disabled = textOnly;
+  if (useOcr) {
+    useOcr.disabled = textOnly;
+    if (textOnly) useOcr.checked = false;
+    else if (!useOcr.checked) useOcr.checked = true;
+  }
+}
+
+async function submitBatch(form) {
+  const button = form.querySelector("#start-batch-button");
+  const errorBox = form.querySelector("#batch-create-error");
+  const urls = String(form.elements.urls.value || "")
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!urls.length) {
+    errorBox.innerHTML = errorState("请至少输入一个视频链接。");
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "正在创建...";
+  errorBox.innerHTML = "";
+  const payload = {
+    urls,
+    target_platform: form.elements.target_platform.value,
+    language: form.elements.language.value,
+    style: form.elements.style.value,
+    max_frames: Number(form.elements.max_frames.value || 12),
+    use_whisper: form.elements.use_whisper.checked,
+    use_ocr: form.elements.use_ocr.checked,
+    text_only: form.elements.text_only.checked,
+    continue_on_error: form.elements.continue_on_error.checked,
+  };
+  try {
+    const created = await apiPost("/api/batches", payload);
+    toast(`批量队列已创建：${created.batch_id}`);
+    navigate(`/batches/${created.batch_id}`);
+  } catch (error) {
+    errorBox.innerHTML = errorState(errorText(error));
+    button.disabled = false;
+    button.textContent = "开始顺序处理";
+  }
+}
+
+async function cancelBatch(batchId) {
+  if (!window.confirm("确定停止整个批次吗？当前任务和所有待处理链接都会停止，已生成的 Word 会保留。")) return;
+  try {
+    await apiPost(`/api/batches/${batchId}/cancel`);
+    toast("批次已停止，现有文档已保留");
+    await renderRoute();
+  } catch (error) {
+    toast(errorText(error));
   }
 }
 
@@ -2722,6 +3111,10 @@ document.addEventListener("submit", (event) => {
     event.preventDefault();
     submitProject(form);
   }
+  if (form.id === "batch-form") {
+    event.preventDefault();
+    submitBatch(form);
+  }
   if (form.id === "llm-settings-form") {
     event.preventDefault();
     saveLlmSettings(form);
@@ -2761,7 +3154,7 @@ document.addEventListener("click", async (event) => {
   if (action === "close-modal") {
     if (event.target.classList.contains("modal-backdrop") || event.target.closest("button")) closeModal();
   }
-  if (action === "refresh-dashboard" || action === "refresh-projects" || action === "refresh-runtime") await renderRoute();
+  if (action === "refresh-dashboard" || action === "refresh-batches" || action === "refresh-projects" || action === "refresh-runtime") await renderRoute();
   if (action === "set-content-route") {
     setContentRoute(actionNode.dataset.routeKey);
     await renderDashboard();
@@ -2782,6 +3175,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "delete-project") await deleteProject(actionNode.dataset.projectId);
   if (action === "cancel-project") await cancelProject(actionNode.dataset.projectId);
+  if (action === "cancel-batch") await cancelBatch(actionNode.dataset.batchId);
   if (action === "rerun-visuals") await rerunProject(actionNode.dataset.projectId, "visuals");
   if (action === "rerun-downstream") await rerunProject(actionNode.dataset.projectId, "downstream");
   if (action === "verify-project") await verifyProject(actionNode.dataset.projectId);
@@ -2804,6 +3198,9 @@ document.addEventListener("input", (event) => {
   }
   if (event.target.id === "text_only") {
     syncTextOnlyControls(event.target.form);
+  }
+  if (event.target.id === "batch-text-only") {
+    syncBatchTextOnlyControls(event.target.form);
   }
 });
 

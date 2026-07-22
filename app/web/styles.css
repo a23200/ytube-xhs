@@ -286,6 +286,65 @@ img {
   min-height: 96px;
 }
 
+.batch-layout {
+  grid-template-columns: minmax(340px, 0.72fr) minmax(0, 1.28fr);
+}
+
+.batch-create-panel {
+  align-self: start;
+}
+
+.batch-create-panel textarea#batch-urls {
+  min-height: 250px;
+  resize: vertical;
+}
+
+.batch-title {
+  margin: 4px 0;
+  font-size: 18px;
+}
+
+.batch-progress {
+  margin: 18px 0 12px;
+}
+
+.batch-output-path {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.batch-output-path span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.batch-output-path code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-current-row td {
+  background: var(--accent-soft);
+}
+
+.batch-url-cell {
+  max-width: 420px;
+}
+
+.batch-error-text {
+  max-width: 420px;
+  margin-top: 5px;
+  color: var(--danger);
+  line-height: 1.4;
+}
+
 .produce-button {
   min-height: 40px;
   border-color: #fecdd3;
@@ -1457,6 +1516,10 @@ code {
     grid-template-columns: 1fr;
   }
 
+  .batch-layout {
+    grid-template-columns: 1fr;
+  }
+
   .input-rail {
     position: static;
     max-height: none;
@@ -1496,7 +1559,33 @@ code {
     grid-template-columns: 1fr;
   }
 
-  .nav-group {
+  .batch-output-path {
     grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    padding: 10px 12px 12px;
+  }
+
+  .brand {
+    padding-bottom: 10px;
+  }
+
+  .nav-group {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 8px;
+  }
+
+  .nav-title,
+  .sidebar-footer {
+    display: none;
+  }
+
+  .nav-link {
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 7px 5px;
+    font-size: 12px;
   }
 }

@@ -4,11 +4,13 @@ __pycache__/
 .pytest_cache/
 .env
 runtime/projects/
+runtime/batches/
 runtime/*.zip
 .DS_Store
 
 # Runtime/generated artifacts
 runtime/logs/
+runtime/.locks/
 runtime/*.log
 runtime/*.pid
 runtime/_self_tests/
