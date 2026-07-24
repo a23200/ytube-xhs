@@ -41,6 +41,14 @@ def test_macos_installer_refreshes_ytdlp_and_secures_platform_auth_dir():
     assert 'chmod 700 "$APP_DIR/runtime/auth"' in script
 
 
+def test_fixed_updater_restarts_backend_after_copying_new_frontend():
+    script = (ROOT / "update-macos.sh").read_text(encoding="utf-8")
+
+    assert 'POST_ACTION="${YTXHS_POST_UPDATE_ACTION:-restart}"' in script
+    assert 'if [ "$POST_ACTION" = "open" ]; then' in script
+    assert '"$APP_DIR/start.sh" restart' in script
+
+
 @pytest.mark.parametrize("extra_args", [[], ["--no-whisper", "--skip-brew"]])
 def test_fixed_macos_updater_runs_with_optional_passthrough_on_bash_3_semantics(tmp_path, extra_args):
     fake_bin = tmp_path / "bin"

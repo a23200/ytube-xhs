@@ -45,7 +45,7 @@ export YTXHS_APP_DIR="/opt/ytube-xhs"
 YTXHS_REF=<发布页中的最新Tag> bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 ```
 
-固定更新脚本会自动下载 GitHub 源码包，再调用项目内 `deploy/macos/install_macos.sh` 完成本地依赖、虚拟环境和 launchd 服务安装；已有 `.env` 与 `runtime/` 不会被覆盖。
+固定更新脚本会自动下载 GitHub 源码包，再调用项目内 `deploy/macos/install_macos.sh` 完成本地依赖、虚拟环境和 launchd 服务安装；已有 `.env` 与 `runtime/` 不会被覆盖。更新完成后默认强制重启并等待健康检查，避免新前端文件与旧 Python 进程同时存在。
 
 如果以后仓库改回 private，脚本仍支持设置 `GH_TOKEN` 或使用已登录的 `gh` CLI 下载源码包。
 
@@ -281,6 +281,8 @@ GitHub 方式：
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 sudo /opt/ytube-xhs/deploy/macos/manage.sh self-test
 ```
+
+更新器默认执行强制重启。若页面提示 `frontend_backend_version_mismatch`，说明存在未由 launchd 管理的旧 Uvicorn 进程，停止该进程后再运行固定更新命令。
 
 部署包方式：
 

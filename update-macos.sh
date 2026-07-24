@@ -8,7 +8,7 @@ HOST="${YTXHS_HOST:-0.0.0.0}"
 PORT="${YTXHS_PORT:-8012}"
 SERVICE_USER="${YTXHS_SERVICE_USER:-${SUDO_USER:-$(id -un)}}"
 LAUNCHD_MODE="${YTXHS_LAUNCHD_MODE:-daemon}"
-POST_ACTION="${YTXHS_POST_UPDATE_ACTION:-start}"
+POST_ACTION="${YTXHS_POST_UPDATE_ACTION:-restart}"
 KEEP_INSTALLER="${YTXHS_KEEP_UPDATE_INSTALLER:-0}"
 PASSTHROUGH=()
 
@@ -33,9 +33,9 @@ Options:
   --port PORT            Uvicorn port. Default: 8012
   --service-user USER    macOS user that runs the service. Default: current sudo caller
   --launchd-mode MODE    daemon | agent | none. Default: daemon
-  --start                After update, ensure service is healthy. Default.
-  --restart              After update, force restart and wait until healthy
-  --open                 After update, ensure service is healthy and open browser
+  --start                Only ensure the existing service is healthy
+  --restart              Force restart and wait until healthy. Default.
+  --open                 Force restart, wait until healthy, then open browser
   --no-start             Do not run post-update start/health action
   --skip-brew            Forwarded to installer
   --skip-homebrew-install Forwarded to installer
@@ -176,7 +176,12 @@ if [ "$POST_ACTION" != "none" ]; then
   fi
   echo
   echo "Post-update action: $POST_ACTION"
-  YTXHS_APP_DIR="$APP_DIR" YTXHS_PORT="$PORT" "$APP_DIR/start.sh" "$POST_ACTION"
+  if [ "$POST_ACTION" = "open" ]; then
+    YTXHS_APP_DIR="$APP_DIR" YTXHS_PORT="$PORT" "$APP_DIR/start.sh" restart
+    YTXHS_APP_DIR="$APP_DIR" YTXHS_PORT="$PORT" "$APP_DIR/start.sh" open
+  else
+    YTXHS_APP_DIR="$APP_DIR" YTXHS_PORT="$PORT" "$APP_DIR/start.sh" "$POST_ACTION"
+  fi
 fi
 
 echo

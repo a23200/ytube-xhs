@@ -742,6 +742,21 @@ async function apiRequest(path, options = {}) {
   const text = await response.text();
   let body = text;
   const contentType = response.headers.get("content-type") || "";
+  const htmlApiResponse = path.startsWith("/api/") && (
+    contentType.includes("text/html") || /^\s*(?:<!doctype\s+html|<html\b)/i.test(text)
+  );
+  if (htmlApiResponse) {
+    const error = new Error("前端文件已更新，但后端仍是未重启的旧进程。请重启 ytube-xhs 服务后刷新页面。");
+    error.status = response.status;
+    error.body = {
+      detail: {
+        code: "frontend_backend_version_mismatch",
+        message: error.message,
+        details: { path, http_status: response.status },
+      },
+    };
+    throw error;
+  }
   if (contentType.includes("application/json") && text) {
     try {
       body = JSON.parse(text);

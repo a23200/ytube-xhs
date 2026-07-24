@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import router
@@ -66,6 +66,17 @@ def index():
 
 @app.get("/{full_path:path}")
 def spa_fallback(full_path: str):
-    if full_path.startswith("api/") or full_path.startswith("static/"):
-        return FileResponse(Path(WEB_DIR) / "index.html", status_code=404)
+    if full_path.startswith("api/"):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": {
+                    "code": "api_route_not_found",
+                    "message": "The requested API route does not exist in this service version.",
+                    "path": f"/{full_path}",
+                }
+            },
+        )
+    if full_path.startswith("static/"):
+        return JSONResponse(status_code=404, content={"detail": "Static asset not found."})
     return FileResponse(Path(WEB_DIR) / "index.html")

@@ -16,6 +16,7 @@ def test_web_ui_serves_required_controls_and_assets():
     runtime_settings = client.get("/settings/runtime")
     script = client.get("/static/app.js")
     styles = client.get("/static/styles.css")
+    missing_api = client.get("/api/route-that-does-not-exist")
 
     assert index.status_code == 200
     assert dashboard.status_code == 200
@@ -27,6 +28,9 @@ def test_web_ui_serves_required_controls_and_assets():
     assert runtime_settings.status_code == 200
     assert script.status_code == 200
     assert styles.status_code == 200
+    assert missing_api.status_code == 404
+    assert missing_api.headers["content-type"] == "application/json; charset=utf-8"
+    assert missing_api.json()["detail"]["code"] == "api_route_not_found"
     assert account_settings.headers["content-type"] == "text/html; charset=utf-8"
     assert account_settings.headers["cache-control"] == "no-store, max-age=0"
     assert account_settings.headers["x-content-type-options"] == "nosniff"
@@ -123,6 +127,8 @@ def test_web_ui_serves_required_controls_and_assets():
         "import-browser-cookie",
         "verify-platform-cookie",
         "X-YTXHS-Cookie-Action",
+        "frontend_backend_version_mismatch",
+        "后端仍是未重启的旧进程",
         'aria-disabled="true"',
     ]:
         assert required in js

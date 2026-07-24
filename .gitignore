@@ -11,6 +11,7 @@ runtime/*.zip
 # Runtime/generated artifacts
 runtime/logs/
 runtime/.locks/
+runtime/auth/
 runtime/*.log
 runtime/*.pid
 runtime/_self_tests/

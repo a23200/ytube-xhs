@@ -230,7 +230,7 @@ API 文档：
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/a23200/ytube-xhs/main/update-macos.sh)"
 ```
 
-以后更新仍执行同一条固定命令；默认部署 GitHub `main` 上的最新可用版本，并保留 `/opt/ytube-xhs/.env` 与 `runtime/`。
+以后更新仍执行同一条固定命令；默认部署 GitHub `main` 上的最新可用版本，强制重启后端并等待健康检查，同时保留 `/opt/ytube-xhs/.env` 与 `runtime/`。强制重启可避免磁盘上的新前端与内存中的旧 Python 路由同时运行。
 安装会注册主服务 `com.ytube-xhs.service` 和启动自检守护 `com.ytube-xhs.bootcheck`，开机后自动拉起服务并做依赖/健康检查。
 
 或者生成离线部署包：
