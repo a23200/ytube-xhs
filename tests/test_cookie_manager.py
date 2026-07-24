@@ -147,6 +147,7 @@ def test_cookie_api_requires_confirmation_and_does_not_expose_values(isolated_au
     assert uploaded.status_code == 200
     assert uploaded.json()["status"] == "session_detected"
     assert statuses.status_code == 200
+    assert statuses.headers["content-type"] == "application/json; charset=utf-8"
     assert len(statuses.json()["platforms"]) == 4
     assert deleted.status_code == 200
     assert "api-secret" not in uploaded.text

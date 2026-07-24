@@ -12,6 +12,15 @@ from app.services.runtime_store import store
 from app.services.task_manager import task_manager
 
 
+UTF8_MEDIA_TYPES = {
+    "application/json",
+    "text/css",
+    "text/html",
+    "text/javascript",
+    "text/plain",
+}
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     store.recover_interrupted_projects()
@@ -28,6 +37,23 @@ app = FastAPI(
 )
 
 app.include_router(router)
+
+
+@app.middleware("http")
+async def enforce_web_encoding(request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type in UTF8_MEDIA_TYPES:
+        response.headers["content-type"] = f"{media_type}; charset=utf-8"
+    if media_type == "text/html":
+        response.headers["cache-control"] = "no-store, max-age=0"
+        response.headers["pragma"] = "no-cache"
+    elif request.url.path.startswith("/static/"):
+        response.headers["cache-control"] = "no-cache"
+    response.headers["x-content-type-options"] = "nosniff"
+    return response
+
 
 WEB_DIR = BASE_DIR / "app" / "web"
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")

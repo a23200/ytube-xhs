@@ -27,6 +27,11 @@ def test_web_ui_serves_required_controls_and_assets():
     assert runtime_settings.status_code == 200
     assert script.status_code == 200
     assert styles.status_code == 200
+    assert account_settings.headers["content-type"] == "text/html; charset=utf-8"
+    assert account_settings.headers["cache-control"] == "no-store, max-age=0"
+    assert account_settings.headers["x-content-type-options"] == "nosniff"
+    assert script.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert script.headers["cache-control"] == "no-cache"
 
     html = index.text
     for required in [
