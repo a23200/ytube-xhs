@@ -222,7 +222,7 @@ def _install_fake_ytdlp_sequence(monkeypatch, items):
     monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
 
 
-def test_ingest_applies_ytdlp_cookie_settings(tmp_path: Path, monkeypatch):
+def test_ingest_prefers_cookie_file_without_reopening_browser_profile(tmp_path: Path, monkeypatch):
     paths = ingest.ProjectPaths(tmp_path / "project")
     paths.ensure()
     cookies_file = tmp_path / "cookies.txt"
@@ -236,7 +236,7 @@ def test_ingest_applies_ytdlp_cookie_settings(tmp_path: Path, monkeypatch):
         ingest.ingest_video("https://www.youtube.com/watch?v=test", "zh", paths)
 
     assert FakeYoutubeDL.seen_opts["cookiefile"] == str(cookies_file)
-    assert FakeYoutubeDL.seen_opts["cookiesfrombrowser"] == ("chrome", "Default", None, None)
+    assert "cookiesfrombrowser" not in FakeYoutubeDL.seen_opts
 
 
 def test_ingest_reports_youtube_bot_check_with_cookie_guidance(tmp_path: Path, monkeypatch):
@@ -252,7 +252,7 @@ def test_ingest_reports_youtube_bot_check_with_cookie_guidance(tmp_path: Path, m
 
     error = exc_info.value.to_dict()
     assert error["code"] == "youtube_bot_check_required"
-    assert "XHS_YTDLP_COOKIES_FROM_BROWSER" in error["message"]
+    assert "Platform Accounts" in error["message"]
     assert error["details"]["cookies_from_browser_configured"] is False
 
 

@@ -1,10 +1,13 @@
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+
+from app.services.source_urls import extract_http_url
 
 SUPPORTED_TARGET_PLATFORMS = ("xhs", "toutiao", "douyin", "bilibili")
 TargetPlatform = Literal["xhs", "toutiao", "douyin", "bilibili"]
+SourcePlatform = Literal["youtube", "douyin", "bilibili", "toutiao"]
 
 
 class ProjectStatus(str, Enum):
@@ -38,6 +41,11 @@ class ProjectCreate(BaseModel):
     use_ocr: bool = True
     text_only: bool = False
     max_frames: int = Field(default=12, ge=8, le=20)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def extract_shared_url(cls, value: object) -> str:
+        return extract_http_url(value)
 
 
 class ProjectCreated(BaseModel):
@@ -88,6 +96,13 @@ class BatchCreate(BaseModel):
     text_only: bool = True
     max_frames: int = Field(default=12, ge=8, le=20)
     continue_on_error: bool = True
+
+    @field_validator("urls", mode="before")
+    @classmethod
+    def extract_shared_urls(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            return value
+        return [extract_http_url(item) for item in value]
 
 
 class BatchItem(BaseModel):
@@ -202,6 +217,22 @@ class ImageSettingsUpdate(BaseModel):
     require_api_key: Optional[str] = Field(default=None, max_length=16)
     size: Optional[str] = Field(default=None, max_length=64)
     timeout_ms: Optional[int] = Field(default=None, ge=1000, le=600000)
+
+
+class CookieBrowserImportRequest(BaseModel):
+    platform: SourcePlatform
+    browser: str = Field(default="chrome", min_length=1, max_length=32)
+    profile: Optional[str] = Field(default=None, max_length=256)
+
+
+class CookieVerifyRequest(BaseModel):
+    platform: SourcePlatform
+    url: str = Field(min_length=8, max_length=4096)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def extract_verification_url(cls, value: object) -> str:
+        return extract_http_url(value)
 
 
 FILE_KIND_TO_PATH = {

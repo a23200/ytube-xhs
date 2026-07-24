@@ -12,6 +12,7 @@ def test_web_ui_serves_required_controls_and_assets():
     batch_detail = client.get("/batches/example-batch")
     project_detail = client.get("/projects/example-project")
     llm_settings = client.get("/settings/llm")
+    account_settings = client.get("/settings/accounts")
     runtime_settings = client.get("/settings/runtime")
     script = client.get("/static/app.js")
     styles = client.get("/static/styles.css")
@@ -22,6 +23,7 @@ def test_web_ui_serves_required_controls_and_assets():
     assert batch_detail.status_code == 200
     assert project_detail.status_code == 200
     assert llm_settings.status_code == 200
+    assert account_settings.status_code == 200
     assert runtime_settings.status_code == 200
     assert script.status_code == 200
     assert styles.status_code == 200
@@ -110,6 +112,12 @@ def test_web_ui_serves_required_controls_and_assets():
         "解决方案",
         "错误位置",
         "密钥已配置",
+        "平台账号与 Cookie",
+        "renderCookieAccounts",
+        "cookie-upload-form",
+        "import-browser-cookie",
+        "verify-platform-cookie",
+        "X-YTXHS-Cookie-Action",
         'aria-disabled="true"',
     ]:
         assert required in js
@@ -121,6 +129,9 @@ def test_web_ui_serves_required_controls_and_assets():
         "/api/llm/self-test",
         "/api/settings/image",
         "/api/image/self-test",
+        "/api/auth/cookies",
+        "/api/auth/cookies/import-browser",
+        "/api/auth/cookies/verify",
         "/api/projects",
         "/api/batches",
         "/api/batches/${batchId}/cancel",
@@ -175,5 +186,8 @@ def test_web_ui_serves_required_controls_and_assets():
         ".batch-current-row",
         ".error-diagnostic",
         ".batch-error-diagnostic",
+        ".cookie-platform-grid",
+        ".cookie-control-band",
+        ".cookie-verification",
     ]:
         assert required in css

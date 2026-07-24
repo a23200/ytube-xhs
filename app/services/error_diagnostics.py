@@ -44,7 +44,7 @@ ERROR_RULES: Dict[str, Dict[str, Any]] = {
         "当前网络出口或 Cookie 会话被 YouTube 判定需要登录确认。公开视频也可能触发。",
         [
             "在运行服务的同一 macOS 用户下登录 Chrome 的 YouTube，并确认视频可正常播放。",
-            "优先导出最新 Netscape 格式 cookies.txt，设置 XHS_YTDLP_COOKIES_FILE 后重启服务。",
+            "打开“平台账号”，为 YouTube 导入或上传最新 Netscape cookies.txt，并用失败链接验证。",
             "若有效 Cookie 仍被拒绝，切换家庭宽带或手机热点后重试。",
         ],
     ),
@@ -52,8 +52,8 @@ ERROR_RULES: Dict[str, Dict[str, Any]] = {
         "平台要求新鲜 Cookie",
         "平台提取器明确要求近期浏览器 Cookie，链接公开不代表媒体接口允许匿名抓取。",
         [
-            "服务与 Chrome 使用同一登录用户时设置 XHS_YTDLP_COOKIES_FROM_BROWSER=chrome。",
-            "无人值守部署建议导出最新 cookies.txt，设置 XHS_YTDLP_COOKIES_FILE 并重启。",
+            "打开“平台账号”，选择对应来源平台并从目标 Mac 的浏览器导入。",
+            "launchd 无法读取浏览器钥匙串时，上传最新 Netscape cookies.txt。",
             "确认 Cookie 来自目标平台已登录且能播放该链接的浏览器会话。",
         ],
     ),
@@ -61,9 +61,9 @@ ERROR_RULES: Dict[str, Dict[str, Any]] = {
         "Cookie 无效或无法读取",
         "Cookie 已过期、格式错误、浏览器配置目录不匹配，或 launchd 用户无权读取浏览器数据。",
         [
-            "重新导出 Netscape 格式 cookies.txt，并确认服务用户对文件有读取权限。",
-            "检查 XHS_YTDLP_COOKIES_FROM_BROWSER 中的浏览器和 Profile 名称。",
-            "重启服务后运行同一链接，避免继续使用旧进程中的配置。",
+            "在“平台账号”查看失效平台，重新导入或上传 Netscape cookies.txt。",
+            "从浏览器导入失败时检查浏览器/Profile；macOS 钥匙串受限时改用文件上传。",
+            "用同一失败链接点击“验证 Cookie”，确认实际 extractor 和底层错误。",
         ],
     ),
     "youtube_media_download_forbidden": _rule(
@@ -93,6 +93,15 @@ ERROR_RULES: Dict[str, Dict[str, Any]] = {
             "使用目标平台正常浏览器会话导出的最新 Cookie。",
         ],
     ),
+    "yt_dlp_precondition_failed": _rule(
+        "平台返回 412 前置条件失败",
+        "平台反自动化校验拒绝了当前 Cookie、客户端指纹或网络会话；B站较常见。",
+        [
+            "在“平台账号”更新对应来源平台 Cookie，并用同一链接验证。",
+            "确认浏览器能正常播放该链接；仍返回 412 时切换网络/IP 并更新 yt-dlp。",
+            "查看实际错误确认专用 extractor 已选中，不要把 412 当成链接私有。",
+        ],
+    ),
     "yt_dlp_unsupported_url": _rule(
         "链接格式不受支持",
         "yt-dlp 没有识别该 URL，可能是复制了中间页、失效短链或平台页面格式已变化。",
@@ -102,6 +111,61 @@ ERROR_RULES: Dict[str, Dict[str, Any]] = {
             "若标准详情页仍失败，记录链接和实际错误以补充平台适配。",
         ],
         retryable=False,
+    ),
+    "source_url_missing": _rule(
+        "没有识别到视频链接",
+        "提交内容中没有 HTTP/HTTPS URL。",
+        ["粘贴 YouTube、抖音、哔哩哔哩或今日头条的视频详情页/分享链接。"],
+        retryable=False,
+    ),
+    "source_url_invalid": _rule(
+        "视频链接格式无效",
+        "链接缺少有效协议或主机名，无法进入平台解析。",
+        ["在浏览器打开视频后重新复制完整地址，确保以 http:// 或 https:// 开头。"],
+        retryable=False,
+    ),
+    "source_url_redirect_timeout": _rule(
+        "平台短链跳转超时",
+        "抖音、B站或头条短链在受控重试后仍未返回最终视频详情页，尚未进入 yt-dlp 平台提取器。",
+        [
+            "查看实际错误中的短链、重试次数和超时秒数。",
+            "在浏览器打开短链，复制跳转后的标准视频详情页 URL 再提交。",
+            "若浏览器同样打开缓慢，再检查网络、DNS、代理或平台可达性。",
+        ],
+    ),
+    "source_url_redirect_failed": _rule(
+        "平台短链解析失败",
+        "短链返回 HTTP 错误、连接失败或无有效最终地址。",
+        ["浏览器打开短链确认未失效；复制最终详情页 URL，或切换网络后重试。"],
+    ),
+    "source_url_redirect_mismatch": _rule(
+        "短链跳转到非预期平台",
+        "最终地址不属于原短链平台，系统为避免错误 Cookie 注入而停止。",
+        ["确认链接未失效或被重定向到广告/登录中间页，再复制标准视频详情页。"],
+        retryable=False,
+    ),
+    "source_url_platform_mismatch": _rule(
+        "链接平台识别不一致",
+        "URL 规范化前后的来源平台不一致。",
+        ["使用标准视频详情页 URL；保留原链接和规范化 URL 用于修复平台规则。"],
+        retryable=False,
+    ),
+    "yt_dlp_wrong_extractor": _rule(
+        "yt-dlp 选中了错误提取器",
+        "系统已识别来源平台，但 yt-dlp 没有使用对应的 YouTube/Douyin/BiliBili/Toutiao 提取器。",
+        [
+            "查看实际 extractor、规范化 URL 和来源平台，确认不是搜索页、活动页或登录中间页。",
+            "运行固定更新脚本更新 yt-dlp；标准详情页仍失败时保留错误用于适配。",
+        ],
+    ),
+    "yt_dlp_generic_extractor_timeout": _rule(
+        "平台链接被 Generic 提取器处理并超时",
+        "已知平台 URL 没有进入平台专用提取器；常见原因是短链未正确跳转、复制了中间页或 yt-dlp 提取器过旧。",
+        [
+            "先查看规范化 URL 和 normalized_host，确认它确实是平台标准详情页。",
+            "运行固定更新脚本更新 yt-dlp，并在“平台账号”验证该平台 Cookie。",
+            "若实际错误仍以 [generic] 开头，保留链接和完整错误用于补充 URL 适配，不要仅增加超时。",
+        ],
     ),
     "yt_dlp_extractor_changed": _rule(
         "平台页面结构已变化",
@@ -123,11 +187,11 @@ ERROR_RULES: Dict[str, Dict[str, Any]] = {
     ),
     "yt_dlp_network_timeout": _rule(
         "平台请求超时",
-        "DNS、TLS、代理、目标平台响应或网络质量导致 yt-dlp 未在超时时间内完成。",
+        "平台专用提取器在页面、字幕、音频或媒体阶段经过受控重试后仍超时。",
         [
-            "确认浏览器能稳定打开目标链接。",
-            "切换网络后重试，并避免同一时间大量下载。",
-            "检查防火墙、DNS、代理和 launchd 服务的网络环境。",
+            "查看 details.retry.phase、attempts 和 normalized_url，确认具体超时阶段。",
+            "在“平台账号”验证该来源平台 Cookie，确认浏览器可稳定播放同一链接。",
+            "只有浏览器也超时时再检查 DNS、代理、防火墙、网络出口或平台限流。",
         ],
     ),
     "youtube_network_tls_failed": _rule(
@@ -438,6 +502,12 @@ def _actual_error(message: str, details: Dict[str, Any]) -> str:
     )
     if actual:
         return actual
+    if details.get("actual_extractor"):
+        return (
+            f"actual_extractor={_clip(details.get('actual_extractor'))}; "
+            f"source_platform={_clip(details.get('source_platform'))}; "
+            f"normalized_url={_clip(details.get('normalized_url'))}"
+        )
     quality = _quality_actual(details)
     if quality:
         return quality
@@ -456,6 +526,9 @@ def _location(step: str, details: Dict[str, Any]) -> Dict[str, Any]:
     }
     for field in (
         "platform",
+        "source_platform",
+        "normalized_host",
+        "actual_extractor",
         "artifact",
         "field",
         "index",

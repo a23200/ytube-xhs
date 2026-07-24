@@ -26,25 +26,26 @@
 
 | 错误码 | 实际含义 | 处理方式 |
 | --- | --- | --- |
-| `youtube_bot_check_required` | YouTube 要求登录确认不是机器人 | 在服务用户的 Chrome 登录 YouTube；优先导出最新 `cookies.txt`；仍失败时切换网络/IP |
-| `yt_dlp_cookies_required` | 平台明确要求近期 Cookie | 设置 `XHS_YTDLP_COOKIES_FROM_BROWSER=chrome`，或配置 `XHS_YTDLP_COOKIES_FILE` 后重启 |
-| `yt_dlp_cookies_invalid` | Cookie 过期、格式错误或服务用户无法读取 | 重新导出 Netscape 格式文件，检查权限、Chrome Profile 和 launchd 用户 |
+| `youtube_bot_check_required` | YouTube 要求登录确认不是机器人 | 到“平台账号”导入/上传 YouTube Cookie，用失败链接验证；仍失败时切换网络/IP |
+| `yt_dlp_cookies_required` | 平台明确要求近期 Cookie | 到“平台账号”选择来源平台，从本机浏览器导入或上传 Netscape `cookies.txt` |
+| `yt_dlp_cookies_invalid` | Cookie 过期、格式错误或服务用户无法读取 | 查看平台状态并重新导入；launchd 无法读取钥匙串时改用文件上传 |
 | `youtube_media_download_forbidden` | YouTube 视频分片返回 403 | 更新 Cookie、切换网络；纯文案任务优先选有公开字幕的视频 |
 | `yt_dlp_access_forbidden` | 平台网页、API 或媒体请求返回 403 | 查看 `actual_error` 确认被拒绝的请求，再更新 Cookie/yt-dlp 或切换网络 |
 | `yt_dlp_rate_limited` | 平台返回 429/请求过快 | 暂停请求、降低并发、换稳定网络后重试 |
+| `yt_dlp_precondition_failed` | 平台返回 HTTP 412，B站反自动化校验常见 | 在“平台账号”更新并验证 B站 Cookie；浏览器可播但仍失败时切换网络并更新 yt-dlp |
 | `yt_dlp_unsupported_url` | URL 未被提取器识别 | 打开链接后复制跳转后的标准视频详情页 URL，并更新 yt-dlp |
+| `source_url_redirect_timeout` / `source_url_redirect_failed` | 平台短链未解析到最终详情页 | 查看短链重试详情；浏览器打开后复制最终标准 URL；只有浏览器也失败时再排查网络 |
+| `source_url_redirect_mismatch` / `source_url_platform_mismatch` | 跳转或规范化后的域不属于原平台 | 检查失效短链、广告/登录中间页，改用标准详情页 URL |
+| `yt_dlp_wrong_extractor` | 已知平台 URL 选中了错误提取器 | 查看 `actual_extractor`、`normalized_url`，更新 yt-dlp 并保留标准链接用于适配 |
+| `yt_dlp_generic_extractor_timeout` | 平台链接被 `[generic]` 处理并超时 | 先修复 URL/短链或提取器选择，不要只提高超时；再验证该平台 Cookie |
 | `yt_dlp_extractor_changed` | 平台页面结构改变 | 运行固定更新脚本；保留 URL 与完整实际错误用于适配 |
 | `yt_dlp_format_unavailable` | 格式选择器没有匹配到媒体 | 更新 yt-dlp，并通过 `yt-dlp --list-formats URL` 获取真实格式 |
-| `yt_dlp_network_timeout` / `yt_dlp_network_error` | DNS、TLS、代理或网络连接异常 | 用浏览器验证链接，检查 DNS/代理/防火墙，切换网络后重试 |
+| `yt_dlp_network_timeout` / `yt_dlp_network_error` | 专用提取器在页面、字幕、音频或媒体阶段连接失败 | 查看 `details.retry.phase` 和每次底层错误，再验证 Cookie；仅真实网络失败时检查 DNS/代理/防火墙 |
 | `douyin_public_share_unavailable` | 抖音短链或公开分享页没有可用结构化数据 | 使用跳转后的 `/video/数字` 标准链接；确认内容未删除且浏览器可播放 |
 | `douyin_public_media_download_failed` | 分享页解析成功，但播放地址下载失败 | 查看实际 HTTP/Content-Type 错误，更新 Cookie或切换网络 |
 | `yt_dlp_failed` | 未命中已有分类 | 必须查看 `diagnostic.actual_error`；它不代表公开 URL 是私有视频 |
 
-Cookie 配置修改后必须重启：
-
-```bash
-sudo /opt/ytube-xhs/deploy/macos/manage.sh restart
-```
+“平台账号”写入的独立 Cookie 会被下一次任务直接读取，无需重启。只有手工修改 `.env` 中的旧版全局 Cookie 环境变量时才需要重启服务。
 
 ## 2. 字幕、音频和 Whisper
 

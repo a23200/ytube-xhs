@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from app.services.config import settings
+from app.services.cookie_manager import list_cookie_statuses
 from app.services.llm_client import sanitize_llm_url
 from app.services.media_utils import command_env, find_command
 
@@ -210,10 +211,25 @@ def collect_diagnostics() -> Dict[str, Any]:
 
 def _yt_dlp_status() -> Dict[str, Any]:
     status = _module_status("yt_dlp", ["yt-dlp"])
+    platform_statuses = list_cookie_statuses().get("platforms", [])
     status["cookies"] = {
         "from_browser": settings.ytdlp_cookies_from_browser or None,
         "file_configured": bool(settings.ytdlp_cookies_file),
         "file_exists": bool(settings.ytdlp_cookies_file and settings.ytdlp_cookies_file.exists()),
+        "platforms": [
+            {
+                "platform": item.get("platform"),
+                "status": item.get("status"),
+                "source": item.get("source"),
+                "cookie_count": item.get("cookie_count", 0),
+            }
+            for item in platform_statuses
+        ],
     }
     status["impersonate"] = settings.ytdlp_impersonate or None
+    status["network"] = {
+        "socket_timeout_seconds": settings.ytdlp_socket_timeout_seconds,
+        "redirect_timeout_seconds": settings.ytdlp_redirect_timeout_seconds,
+        "extract_attempts": settings.ytdlp_extract_attempts,
+    }
     return status

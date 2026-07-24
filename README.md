@@ -81,6 +81,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pip install --upgrade 'yt-dlp>=2025.1.15'
 ```
 
 如果需要处理无字幕视频或启用 OCR：
@@ -107,7 +108,9 @@ cp .env.example .env
 应用启动时会自动读取项目根目录 `.env`，已有系统环境变量优先级更高。
 `XHS_RUNTIME_DIR` 支持绝对路径或相对路径；相对路径会按项目根目录解析，默认写入 `./runtime`。
 
-抖音以及部分 YouTube、哔哩哔哩公开视频可能要求最新浏览器 Cookie。交互式本机运行可设置 `XHS_YTDLP_COOKIES_FROM_BROWSER=chrome`；无人值守 launchd 服务建议从能正常打开目标视频的浏览器导出最新 `cookies.txt`，设置 `XHS_YTDLP_COOKIES_FILE=/absolute/path/to/cookies.txt`。出现 `yt_dlp_cookies_required` 时说明平台要求 Cookie，不代表公开视频已失效。
+YouTube、抖音、哔哩哔哩和今日头条使用独立 Cookie 文件。打开 `/settings/accounts` 可查看每个平台的未配置、可读取、检测到登录会话、过期或验证失败状态；可打开官方登录页、从服务所在 Mac 的浏览器导入、上传 Netscape `cookies.txt`，并用实际失败链接验证。文件保存在 `runtime/auth/{platform}.cookies.txt`，目录权限 `0700`、文件权限 `0600`，接口和日志不会返回 Cookie 值。旧版 `XHS_YTDLP_COOKIES_FILE` / `XHS_YTDLP_COOKIES_FROM_BROWSER` 仍兼容，但平台独立文件优先，且已有文件时不会再次读取整个浏览器 Cookie 库。
+
+短链会先经过受控跳转和平台域校验，再交给 yt-dlp；已知平台 URL 如果落入 `[generic]` 提取器会返回独立错误，而不会被笼统归为网络超时。`XHS_YTDLP_REDIRECT_TIMEOUT_SECONDS` 控制短链单次超时，`XHS_YTDLP_EXTRACT_ATTEMPTS` 控制页面/媒体阶段的瞬时网络重试次数。
 
 对于能在 `iesdouyin.com` 公开分享页直接展示的抖音视频，yt-dlp 明确要求 fresh cookies 时会自动尝试同平台公开分享页回退：校验作品 ID 后读取结构化 `_ROUTER_DATA`，直接下载公开 MP4，不调用第三方解析站。分享页未公开、图文、登录/付费/受限内容仍不会绕过平台限制，并继续返回结构化 Cookie 或公开分享页错误。
 
@@ -194,6 +197,7 @@ Web UI：
 - `/projects`：历史项目表格，支持查看、下载 ZIP、删除非运行态项目。
 - `/projects/{project_id}`：项目详情页，按概览、字幕、关键帧、OCR、创作底稿、四个平台稿和文件下载查看真实产物。
 - `/settings/llm`：文案 LLM 与生图 API 分开配置、自检和最后错误展示；API Key 不在前端回显。
+- `/settings/accounts`：按来源平台管理 Cookie，显示有效数量和过期状态，支持浏览器导入、文件上传和链接验证；不保存账号密码。
 - `/settings/runtime`：运行环境诊断，检查 yt-dlp、ffmpeg、faster-whisper、PySceneDetect、OpenCV、OCR Provider、LLM Provider、生图 Provider 和 runtime 目录权限。
 
 操作台支持：

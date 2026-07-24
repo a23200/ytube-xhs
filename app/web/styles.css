@@ -358,6 +358,142 @@ img {
   font-size: 13px;
 }
 
+.cookie-platform-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.cookie-platform {
+  min-width: 0;
+}
+
+.cookie-security-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.cookie-security-bar p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.cookie-security-bar code {
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta-grid.cookie-meta-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cookie-domains,
+.cookie-login-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.cookie-control-band {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.cookie-control-band .button,
+.cookie-control-band .ghost-button {
+  justify-self: start;
+}
+
+.cookie-verification {
+  min-height: 68px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  background: var(--panel-soft);
+}
+
+.cookie-verification.verification-ok {
+  border-left-color: var(--success);
+}
+
+.cookie-verification.verification-failed {
+  border-left-color: var(--danger);
+}
+
+.cookie-verification span,
+.cookie-verification p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cookie-verification p {
+  max-height: 72px;
+  margin: 7px 0 0;
+  overflow: auto;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.cookie-action-result {
+  border-left: 3px solid var(--success);
+}
+
+.cookie-action-result.result-error {
+  border-left-color: var(--danger);
+}
+
+.cookie-action-result pre {
+  max-height: 180px;
+  margin: 10px 0 0;
+  overflow: auto;
+  color: var(--code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inline-error {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.inline-error code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 1100px) {
+  .cookie-platform-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 680px) {
+  .cookie-security-bar {
+    display: grid;
+  }
+
+  .cookie-security-bar code {
+    max-width: 100%;
+  }
+
+  .meta-grid.cookie-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .batch-error-diagnostic > span {
   color: #b42318;
   font-size: 11px;

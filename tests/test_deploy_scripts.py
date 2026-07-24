@@ -33,6 +33,14 @@ def test_macos_bootcheck_plist_template_contains_launchd_keys():
     assert "bootcheck.out.log" in template
 
 
+def test_macos_installer_refreshes_ytdlp_and_secures_platform_auth_dir():
+    script = (ROOT / "deploy/macos/install_macos.sh").read_text(encoding="utf-8")
+
+    assert "pip install --upgrade 'yt-dlp>=2025.1.15'" in script
+    assert 'mkdir -p "$APP_DIR/runtime/logs" "$APP_DIR/runtime/auth"' in script
+    assert 'chmod 700 "$APP_DIR/runtime/auth"' in script
+
+
 @pytest.mark.parametrize("extra_args", [[], ["--no-whisper", "--skip-brew"]])
 def test_fixed_macos_updater_runs_with_optional_passthrough_on_bash_3_semantics(tmp_path, extra_args):
     fake_bin = tmp_path / "bin"

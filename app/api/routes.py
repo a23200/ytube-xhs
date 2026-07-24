@@ -5,13 +5,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from app.schemas.models import (
     FILE_KIND_TO_PATH,
     BatchCreate,
     BatchCreated,
+    CookieBrowserImportRequest,
+    CookieVerifyRequest,
     ImageSettingsUpdate,
     LLMSettingsUpdate,
     ProjectCreate,
@@ -24,6 +26,15 @@ from app.services.article_quality import evaluate_article_quality, quality_error
 from app.services.batch_manager import batch_manager
 from app.services.batch_store import BATCH_TERMINAL_STATUSES, batch_store
 from app.services.contracts import validate_content_assets, validate_xhs_post
+from app.services.cookie_manager import (
+    MAX_COOKIE_FILE_BYTES,
+    CookieManagerError,
+    delete_managed_cookie,
+    import_cookie_text,
+    import_from_browser,
+    list_cookie_statuses,
+    verify_cookie,
+)
 from app.services.diagnostics import collect_diagnostics
 from app.services.error_diagnostics import diagnose_error, error_catalog
 from app.services.errors import PipelineError
@@ -53,6 +64,17 @@ router = APIRouter(prefix="/api")
 FRAME_FILENAME_RE = re.compile(r"^frame_\d{4}\.jpg$")
 CARD_FILENAME_RE = re.compile(r"^(cover|summary|slide_\d{2})\.png$")
 DOCX_KIND_RE = re.compile(r"^(xhs|toutiao|douyin|bilibili)_post_docx$")
+
+
+def _require_cookie_action_confirmation(request: Request) -> None:
+    if request.headers.get("X-YTXHS-Cookie-Action") != "confirm":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "cookie_action_confirmation_required",
+                "message": "Cookie write actions must come from the account-management UI.",
+            },
+        )
 
 STATUS_UI: dict[str, dict[str, Any]] = {
     "queued": {
@@ -825,6 +847,48 @@ def save_image_settings(request: ImageSettingsUpdate) -> dict:
 @router.get("/image/self-test")
 def image_self_test(real: bool = False) -> dict:
     return image_client.self_test(real=real)
+
+
+@router.get("/auth/cookies")
+def read_cookie_statuses() -> dict:
+    return list_cookie_statuses()
+
+
+@router.post("/auth/cookies/import-browser")
+def import_browser_cookies(request_body: CookieBrowserImportRequest, request: Request) -> dict:
+    _require_cookie_action_confirmation(request)
+    try:
+        return import_from_browser(request_body.platform, request_body.browser, request_body.profile)
+    except CookieManagerError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
+
+
+@router.post("/auth/cookies/verify")
+def verify_platform_cookies(request_body: CookieVerifyRequest, request: Request) -> dict:
+    _require_cookie_action_confirmation(request)
+    try:
+        return verify_cookie(request_body.platform, request_body.url)
+    except CookieManagerError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
+
+
+@router.post("/auth/cookies/{platform}/upload")
+async def upload_platform_cookies(platform: str, request: Request, file: UploadFile = File(...)) -> dict:
+    _require_cookie_action_confirmation(request)
+    content = await file.read(MAX_COOKIE_FILE_BYTES + 1)
+    try:
+        return import_cookie_text(platform, content)
+    except CookieManagerError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
+
+
+@router.delete("/auth/cookies/{platform}")
+def delete_platform_cookies(platform: str, request: Request) -> dict:
+    _require_cookie_action_confirmation(request)
+    try:
+        return delete_managed_cookie(platform)
+    except CookieManagerError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
 
 
 @router.get("/platforms")

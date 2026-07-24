@@ -357,8 +357,9 @@ if [ "$SOURCE_DIR" != "$(cd "$APP_DIR" 2>/dev/null && pwd -P || echo "$APP_DIR")
     "$SOURCE_DIR/" "$APP_DIR/"
 fi
 
-mkdir -p "$APP_DIR/runtime/logs" "$APP_DIR/secrets"
+mkdir -p "$APP_DIR/runtime/logs" "$APP_DIR/runtime/auth" "$APP_DIR/secrets"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$APP_DIR"
+chmod 700 "$APP_DIR/runtime/auth" "$APP_DIR/secrets"
 chmod +x "$APP_DIR/start.sh" "$APP_DIR/deploy/macos/"*.sh "$APP_DIR/scripts/"*.sh 2>/dev/null || true
 
 if [ "$INSTALL_BREW_PACKAGES" -eq 1 ]; then
@@ -382,6 +383,8 @@ fi
 echo "Installing Python dependencies..."
 run_as_service_user .venv/bin/python -m pip install --upgrade pip
 run_as_service_user .venv/bin/python -m pip install -r requirements.txt
+echo "Updating yt-dlp platform extractors..."
+run_as_service_user .venv/bin/python -m pip install --upgrade 'yt-dlp>=2025.1.15'
 if [ "$INSTALL_WHISPER" -eq 1 ]; then
   run_as_service_user .venv/bin/python -m pip install 'faster-whisper>=1.1,<2.0'
 fi

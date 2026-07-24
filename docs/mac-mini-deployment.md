@@ -89,10 +89,11 @@ sudo deploy/macos/install_macos.sh \
 - 复制项目文件到 `/opt/ytube-xhs`
 - 创建 `.venv`
 - 安装 Python 依赖，包括真实 Word `.docx` 导出所需的 `python-docx`
+- 每次安装/固定更新都显式升级 yt-dlp，避免复用旧 `.venv` 时平台提取器停留在旧版
 - 默认安装 `faster-whisper`，用于无字幕视频转录
 - 安装/检查 `ffmpeg`、`tesseract`、`tesseract-lang`
 - 创建 `/opt/ytube-xhs/.env`
-- 创建 `runtime/logs`
+- 创建 `runtime/logs` 和权限为 `0700` 的 `runtime/auth`
 - 创建并持久化 `runtime/projects` 与 `runtime/batches` 业务产物目录
 - 注册主服务 LaunchDaemon：`com.ytube-xhs.service`，开机自启并异常退出自动拉起
 - 注册启动自检/自恢复 LaunchDaemon：`com.ytube-xhs.bootcheck`，开机和每 5 分钟检查依赖、拉起服务、健康检查，失败时自动重启服务
@@ -145,30 +146,33 @@ XHS_IMAGE_MODEL=你的生图模型
 XHS_IMAGE_REQUIRE_API_KEY=auto
 ```
 
-平台 Cookie：抖音以及部分 YouTube、哔哩哔哩公开视频也可能要求最新浏览器 Cookie。无人值守服务不建议依赖 Chrome profile，优先从能正常打开目标视频的浏览器导出最新 `cookies.txt` 到：
+平台 Cookie：浏览器打开 `http://<Mac-mini-IP>:8012/settings/accounts`，分别管理 YouTube、抖音、哔哩哔哩和今日头条。每个平台可执行：
 
-```bash
-sudo mkdir -p /opt/ytube-xhs/secrets
-sudo cp cookies.txt /opt/ytube-xhs/secrets/cookies.txt
-sudo chown "$USER":staff /opt/ytube-xhs/secrets/cookies.txt
-sudo chmod 600 /opt/ytube-xhs/secrets/cookies.txt
+1. 打开官方登录页并在有权访问内容的账号中登录。
+2. 如果页面就在服务所在 Mac 打开，点击“从本机浏览器导入并检测”。
+3. 如果通过另一台电脑远程打开页面，或 launchd 无法解锁 Chrome 钥匙串，从已登录浏览器导出 Netscape `cookies.txt` 后上传。
+4. 粘贴实际失败的视频链接，点击“验证 Cookie”，确认专用 extractor、标题和验证时间。
+
+项目不接收或保存账号密码。Cookie 值不会通过 API、页面或日志回显；只显示平台域、数量、过期摘要和验证错误。平台文件保存到：
+
+```text
+/opt/ytube-xhs/runtime/auth/youtube.cookies.txt
+/opt/ytube-xhs/runtime/auth/douyin.cookies.txt
+/opt/ytube-xhs/runtime/auth/bilibili.cookies.txt
+/opt/ytube-xhs/runtime/auth/toutiao.cookies.txt
 ```
 
-并设置：
-
-```env
-XHS_YTDLP_COOKIES_FILE=/opt/ytube-xhs/secrets/cookies.txt
-XHS_YTDLP_COOKIES_FROM_BROWSER=
-```
-
-如果服务以当前已登录的 macOS 用户运行，并且该用户的 Chrome 能正常打开目标视频，也可不使用 Cookie 文件，改为：
+安装器设置目录权限 `0700`、文件权限 `0600`，固定更新脚本保留整个 `runtime/`。旧版全局环境变量继续兼容，但仅作为无平台文件时的回退：
 
 ```env
 XHS_YTDLP_COOKIES_FILE=
-XHS_YTDLP_COOKIES_FROM_BROWSER=chrome
+XHS_YTDLP_COOKIES_FROM_BROWSER=
+XHS_YTDLP_SOCKET_TIMEOUT_SECONDS=30
+XHS_YTDLP_REDIRECT_TIMEOUT_SECONDS=12
+XHS_YTDLP_EXTRACT_ATTEMPTS=2
 ```
 
-`Fresh cookies (not necessarily logged in) are needed` 表示平台需要新的匿名或登录态浏览器 Cookie，不代表公开视频已失效。配置过期 Cookie 时会返回 `yt_dlp_cookies_invalid`；完全未配置但平台明确要求时会返回 `yt_dlp_cookies_required`。
+`Fresh cookies (not necessarily logged in) are needed` 表示平台需要新的匿名或登录态浏览器 Cookie，不代表公开视频已失效。平台文件存在时任务只使用该来源平台文件，不会再读取整个 Chrome Cookie 库。
 
 抖音公开视频另有同平台公开分享页回退：当 yt-dlp 明确要求 fresh cookies，且 `iesdouyin.com/share/video/{id}/` 公开返回匹配作品 ID 的结构化数据时，系统直接下载公开 MP4，不依赖第三方解析服务。未公开、图文或受限内容仍需要合法 Cookie/授权。
 

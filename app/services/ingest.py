@@ -1,5 +1,6 @@
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -7,9 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from app.services.config import settings
+from app.services.cookie_manager import active_cookie_source, cookie_status, sanitize_error_text
 from app.services.errors import PipelineError
 from app.services.media_utils import require_command, run_command
 from app.services.runtime_store import ProjectPaths, write_json
+from app.services.source_urls import SourceUrlError, extractor_matches_platform, prepare_source_url
 
 LANGUAGE_CANDIDATES = {
     "zh": ["zh-Hans", "zh-CN", "zh", "zh-Hant", "en"],
@@ -53,6 +56,7 @@ def _safe_metadata(
 ) -> Dict[str, Any]:
     subtitles = info.get("subtitles") or {}
     automatic_captions = info.get("automatic_captions") or {}
+    source_context = info.get("_ytxhs_source_context") or {}
     return {
         "video_id": info.get("id"),
         "url": info.get("webpage_url") or info.get("original_url"),
@@ -71,6 +75,16 @@ def _safe_metadata(
         "audio_file": str(audio_path) if audio_path else None,
         "subtitle_file": str(subtitle_path) if subtitle_path else None,
         "source_extractor": info.get("extractor_key") or info.get("extractor"),
+        "source_platform": source_context.get("source_platform"),
+        "requested_url": source_context.get("original_url"),
+        "normalized_url": source_context.get("normalized_url"),
+        "url_normalization": {
+            "original_host": source_context.get("original_host"),
+            "normalized_host": source_context.get("normalized_host"),
+            "short_link": bool(source_context.get("short_link")),
+            "redirect_chain": source_context.get("redirect_chain") or [],
+            "redirect_attempts": source_context.get("redirect_attempts") or 0,
+        },
         "source": {
             "webpage_url": info.get("webpage_url"),
             "original_url": info.get("original_url"),
@@ -314,8 +328,16 @@ def _douyin_public_info(url: str) -> tuple[Dict[str, Any], str]:
         ) from exc
 
 
-def _download_douyin_public_video(url: str, paths: ProjectPaths, *, text_only: bool) -> Dict[str, Any]:
+def _download_douyin_public_video(
+    url: str,
+    paths: ProjectPaths,
+    *,
+    text_only: bool,
+    source_context: Optional[dict] = None,
+) -> Dict[str, Any]:
     info, play_url = _douyin_public_info(url)
+    if source_context:
+        info["_ytxhs_source_context"] = dict(source_context)
     target = paths.source_dir / f"{info['id']}.mp4"
     partial = target.with_suffix(".mp4.part")
     try:
@@ -423,6 +445,20 @@ def _is_rate_limited(message: str) -> bool:
     )
 
 
+def _is_precondition_failed(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "http error 412",
+            "412 precondition failed",
+            "status code 412",
+            "http status 412",
+            "precondition failed",
+        )
+    )
+
+
 def _is_unsupported_url(message: str) -> bool:
     lowered = message.lower()
     return "unsupported url" in lowered or "no suitable extractor" in lowered
@@ -517,9 +553,18 @@ def _browser_cookie_spec(value: Optional[str]) -> Optional[tuple[str, Optional[s
     return (browser, profile, keyring, container)
 
 
-def _apply_cookie_options(ydl_opts: Dict[str, Any]) -> None:
-    if settings.ytdlp_cookies_file:
-        ydl_opts["cookiefile"] = str(settings.ytdlp_cookies_file)
+def _apply_cookie_options(ydl_opts: Dict[str, Any], source_platform: Optional[str] = None) -> None:
+    cookie_path = None
+    if source_platform:
+        try:
+            cookie_path, _source = active_cookie_source(source_platform)
+        except ValueError:
+            cookie_path = None
+    elif settings.ytdlp_cookies_file:
+        cookie_path = settings.ytdlp_cookies_file
+    if cookie_path and Path(cookie_path).exists():
+        ydl_opts["cookiefile"] = str(cookie_path)
+        return
     browser_spec = _browser_cookie_spec(settings.ytdlp_cookies_from_browser)
     if browser_spec:
         ydl_opts["cookiesfrombrowser"] = browser_spec
@@ -540,16 +585,48 @@ def _apply_impersonation_options(ydl_opts: Dict[str, Any]) -> None:
     ydl_opts["impersonate"] = ImpersonateTarget.from_str(settings.ytdlp_impersonate.lower())
 
 
-def _yt_dlp_error(code: str, message: str, raw_error: str) -> PipelineError:
+def _cookie_error_context(source_platform: Optional[str]) -> dict:
+    if not source_platform:
+        return {
+            "source_platform": None,
+            "cookie_source": "legacy_global" if settings.ytdlp_cookies_file else ("legacy_browser" if settings.ytdlp_cookies_from_browser else "none"),
+            "cookie_status": None,
+        }
+    try:
+        status = cookie_status(source_platform)
+        return {
+            "source_platform": source_platform,
+            "cookie_source": status.get("source"),
+            "cookie_status": status.get("status"),
+            "cookie_count": status.get("cookie_count", 0),
+        }
+    except Exception:
+        return {"source_platform": source_platform, "cookie_source": "unknown", "cookie_status": "unknown"}
+
+
+def _yt_dlp_error(
+    code: str,
+    message: str,
+    raw_error: str,
+    *,
+    source_context: Optional[dict] = None,
+    retry_context: Optional[dict] = None,
+) -> PipelineError:
+    source_context = source_context or {}
+    cookie_context = _cookie_error_context(source_context.get("source_platform"))
+    active_cookie_configured = cookie_context.get("cookie_source") not in {None, "none", "legacy_browser"}
     return PipelineError(
         code=code,
         message=message,
         step="ingest",
         details={
-            "error": raw_error,
+            "error": sanitize_error_text(raw_error),
             "cookies_from_browser_configured": bool(settings.ytdlp_cookies_from_browser),
-            "cookies_file_configured": bool(settings.ytdlp_cookies_file),
+            "cookies_file_configured": bool(settings.ytdlp_cookies_file) or active_cookie_configured,
             "impersonate": settings.ytdlp_impersonate,
+            **cookie_context,
+            **source_context,
+            "retry": retry_context or {},
         },
     )
 
@@ -563,6 +640,7 @@ def _base_ydl_opts(
     player_clients: Optional[list[str]] = None,
     use_cookies: bool = True,
     write_subtitles: bool = True,
+    source_platform: Optional[str] = None,
 ) -> Dict[str, Any]:
     ydl_opts: Dict[str, Any] = {
         "outtmpl": output_template,
@@ -577,6 +655,7 @@ def _base_ydl_opts(
         "no_warnings": False,
         "retries": 3,
         "fragment_retries": 3,
+        "extractor_retries": 1,
         "socket_timeout": settings.ytdlp_socket_timeout_seconds,
         "extractor_args": {
             "youtube": {
@@ -590,7 +669,7 @@ def _base_ydl_opts(
     if not download:
         ydl_opts["skip_download"] = True
     if use_cookies:
-        _apply_cookie_options(ydl_opts)
+        _apply_cookie_options(ydl_opts, source_platform)
     _apply_impersonation_options(ydl_opts)
     return ydl_opts
 
@@ -616,14 +695,81 @@ def _public_android_fallback_opts(output_template: str, language: str) -> Dict[s
     )
 
 
-def _audio_only_opts(output_template: str, language: str) -> Dict[str, Any]:
+def _audio_only_opts(output_template: str, language: str, source_platform: Optional[str] = None) -> Dict[str, Any]:
     return _base_ydl_opts(
         output_template,
         language,
         download=True,
         format_selector=AUDIO_ONLY_FORMAT,
         write_subtitles=False,
+        source_platform=source_platform,
     )
+
+
+def _is_transient_yt_dlp_error(message: str) -> bool:
+    lowered = message.lower()
+    return (
+        _is_network_timeout(message)
+        or _is_network_connection_error(message)
+        or any(
+            marker in lowered
+            for marker in (
+                "http error 500",
+                "http error 502",
+                "http error 503",
+                "http error 504",
+                "bad gateway",
+                "service unavailable",
+                "gateway timeout",
+            )
+        )
+    )
+
+
+def _extract_info_with_retries(
+    yt_dlp_module: Any,
+    options: Dict[str, Any],
+    url: str,
+    *,
+    download: bool,
+    phase: str,
+) -> Any:
+    failures = []
+    last_error: Optional[Exception] = None
+    attempts = max(1, settings.ytdlp_extract_attempts)
+    for attempt in range(1, attempts + 1):
+        started = time.monotonic()
+        try:
+            with yt_dlp_module.YoutubeDL(options) as ydl:
+                result = ydl.extract_info(url, download=download)
+            return result
+        except Exception as exc:
+            last_error = exc
+            message = sanitize_error_text(exc)
+            failures.append(
+                {
+                    "attempt": attempt,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "error": message,
+                }
+            )
+            if attempt >= attempts or not _is_transient_yt_dlp_error(message):
+                break
+            time.sleep(min(3.0, 0.75 * (2 ** (attempt - 1))))
+    if last_error is None:
+        last_error = RuntimeError("yt-dlp extraction failed without an exception")
+    retry_context = {
+        "phase": phase,
+        "attempts": len(failures),
+        "configured_attempts": attempts,
+        "socket_timeout_seconds": settings.ytdlp_socket_timeout_seconds,
+        "failures": failures,
+    }
+    try:
+        setattr(last_error, "_ytxhs_retry_context", retry_context)
+    except Exception:
+        pass
+    raise last_error
 
 
 def _write_text_only_media_fallback_metadata(
@@ -663,10 +809,20 @@ def _download_text_only_android_fallback(
     subtitle_path: Optional[Path],
     ingest_warnings: list[str],
     reason: str,
+    source_context: Optional[dict] = None,
 ) -> Dict[str, Any]:
     fallback_opts = _public_android_fallback_opts(output_template, language)
-    with yt_dlp_module.YoutubeDL(fallback_opts) as ydl:
-        fallback_info = _normalize_info(ydl.extract_info(url, download=True), url)
+    fallback_info = _normalize_info(
+        _extract_info_with_retries(
+            yt_dlp_module,
+            fallback_opts,
+            url,
+            download=True,
+            phase="youtube_android_media_fallback",
+        ),
+        url,
+        source_context,
+    )
     video_id = fallback_info.get("id")
     audio_path = _find_downloaded_audio(paths.source_dir, video_id)
     video_path = _find_downloaded_video(paths.source_dir, video_id)
@@ -689,7 +845,7 @@ def _download_text_only_android_fallback(
     )
 
 
-def _normalize_info(info: Any, url: str) -> Dict[str, Any]:
+def _normalize_info(info: Any, url: str, source_context: Optional[dict] = None) -> Dict[str, Any]:
     if not info:
         raise PipelineError(
             code="yt_dlp_no_info",
@@ -705,16 +861,38 @@ def _normalize_info(info: Any, url: str) -> Dict[str, Any]:
             details={"url": url, "payload_type": type(info).__name__},
         )
     if "entries" not in info:
-        return info
-    entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
-    if not entries:
-        raise PipelineError(
-            code="yt_dlp_no_info",
-            message="yt-dlp returned a playlist or collection with no usable video entries.",
-            step="ingest",
-            details={"url": url, "extractor": info.get("extractor_key") or info.get("extractor")},
-        )
-    return entries[0]
+        normalized = info
+    else:
+        entries = [entry for entry in (info.get("entries") or []) if isinstance(entry, dict)]
+        if not entries:
+            raise PipelineError(
+                code="yt_dlp_no_info",
+                message="yt-dlp returned a playlist or collection with no usable video entries.",
+                step="ingest",
+                details={"url": url, "extractor": info.get("extractor_key") or info.get("extractor")},
+            )
+        normalized = entries[0]
+    if source_context:
+        normalized = dict(normalized)
+        normalized["_ytxhs_source_context"] = dict(source_context)
+    return normalized
+
+
+def _validate_source_extractor(info: Dict[str, Any], source_context: dict) -> None:
+    source_platform = source_context.get("source_platform")
+    extractor = info.get("extractor_key") or info.get("extractor")
+    if extractor_matches_platform(source_platform, extractor):
+        return
+    raise PipelineError(
+        code="yt_dlp_wrong_extractor",
+        message="yt-dlp selected the wrong extractor for this platform URL after normalization.",
+        step="ingest",
+        details={
+            "actual_extractor": extractor,
+            "source_platform": source_platform,
+            **source_context,
+        },
+    )
 
 
 def _write_metadata(
@@ -744,115 +922,142 @@ def _write_metadata(
     return metadata
 
 
-def _raise_ingest_ytdlp_error(message: str, exc: Exception, url: str, language: str, paths: ProjectPaths, output_template: str) -> None:
+def _raise_ingest_ytdlp_error(
+    message: str,
+    exc: Exception,
+    url: str,
+    language: str,
+    paths: Optional[ProjectPaths],
+    output_template: str,
+    source_context: Optional[dict] = None,
+) -> None:
+    del url, language, paths, output_template
+    source_context = source_context or {}
+    retry_context = getattr(exc, "_ytxhs_retry_context", None)
+
+    def _error(code: str, description: str) -> PipelineError:
+        return _yt_dlp_error(
+            code,
+            description,
+            message,
+            source_context=source_context,
+            retry_context=retry_context,
+        )
+
     if _is_youtube_bot_check_error(message):
-        raise _yt_dlp_error(
+        raise _error(
             "youtube_bot_check_required",
             (
                 "YouTube is asking yt-dlp to sign in and confirm this request is not a bot. "
-                "Configure XHS_YTDLP_COOKIES_FROM_BROWSER=chrome or XHS_YTDLP_COOKIES_FILE=/path/to/cookies.txt, then retry."
+                "Import or upload a fresh YouTube Cookie in Platform Accounts, then retry."
             ),
-            message,
         ) from exc
     if _is_fresh_cookies_required(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_cookies_required",
             (
                 "The platform requires fresh browser cookies even for this public video. "
-                "Configure XHS_YTDLP_COOKIES_FROM_BROWSER=chrome when the service runs as the logged-in browser user, "
-                "or export a fresh cookies.txt file and set XHS_YTDLP_COOKIES_FILE, then restart and retry."
+                "Open Platform Accounts, sign in in a browser, then import or upload that platform's cookies.txt file."
             ),
-            message,
         ) from exc
     if _is_media_download_forbidden(message):
-        raise _yt_dlp_error(
+        if source_context.get("source_platform") not in {None, "youtube"}:
+            raise _error(
+                "yt_dlp_access_forbidden",
+                "The source platform refused the media download. Verify that platform's Cookie against this URL, then retry.",
+            ) from exc
+        raise _error(
             "youtube_media_download_forbidden",
             (
                 "YouTube returned 403 Forbidden while yt-dlp was downloading the media stream. "
                 "The video metadata may be public, but the media URL is blocked for this runtime. "
-                "Try exporting a fresh cookies.txt via a browser extension and set XHS_YTDLP_COOKIES_FILE, "
-                "or retry from a different network/IP."
+                "Verify a fresh YouTube Cookie in Platform Accounts or retry from a different network/IP."
             ),
-            message,
         ) from exc
     if _is_requested_format_unavailable(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_format_unavailable",
             (
                 "yt-dlp could read the media page, but the requested media format is not available. "
                 "Update yt-dlp and inspect the video's real formats with yt-dlp --list-formats; this does not mean the public URL is private."
             ),
-            message,
         ) from exc
     if _is_access_forbidden(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_access_forbidden",
             (
                 "The platform returned HTTP 403 for a webpage, API, or media request. "
                 "Review details.error to identify the rejected request, then refresh cookies, update yt-dlp, or change network/IP."
             ),
-            message,
         ) from exc
     if _is_rate_limited(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_rate_limited",
             "The platform rate-limited yt-dlp. Pause requests, reduce concurrency, and retry from a stable browser/network session.",
-            message,
+        ) from exc
+    if _is_precondition_failed(message):
+        raise _error(
+            "yt_dlp_precondition_failed",
+            (
+                "The platform returned HTTP 412 Precondition Failed, usually because its anti-automation checks rejected "
+                "the current Cookie, client fingerprint, or network session. Verify a fresh platform Cookie against this URL."
+            ),
         ) from exc
     if _is_unsupported_url(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_unsupported_url",
             "yt-dlp does not recognize this URL. Use the platform's canonical video detail URL and update yt-dlp before retrying.",
-            message,
         ) from exc
     if _is_extractor_changed(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_extractor_changed",
             "yt-dlp could not extract the expected fields from the platform response. Update the extractor and review details.error.",
-            message,
         ) from exc
     if _is_cookie_error(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_cookies_invalid",
-            "The configured browser cookies or cookies.txt file could not be used. Export fresh cookies from an authorized browser session and retry.",
-            message,
+            "The selected platform Cookie could not be used. Import or upload a fresh Cookie in Platform Accounts and verify it against this URL.",
+        ) from exc
+    if source_context.get("source_platform") and "[generic]" in message.lower():
+        code = "yt_dlp_generic_extractor_timeout" if _is_network_timeout(message) else "yt_dlp_wrong_extractor"
+        raise _error(
+            code,
+            (
+                "yt-dlp used the Generic extractor instead of the detected platform extractor. "
+                "The URL may be an unresolved short link, malformed share link, or a platform URL unsupported by the installed yt-dlp version."
+            ),
         ) from exc
     if _is_network_timeout(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_network_timeout",
-            "The yt-dlp request timed out before the platform responded. Retry later or check the target Mac's network path.",
-            message,
+            "The platform request timed out after controlled retries. Review details.retry.phase and the normalized URL before checking DNS, proxy, or network quality.",
         ) from exc
     if _is_network_connection_error(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_network_error",
             "The platform connection failed before extraction completed. Check DNS, TLS, proxy, and the target Mac's network path.",
-            message,
         ) from exc
     if _is_ytdlp_update_required(message):
-        raise _yt_dlp_error(
+        raise _error(
             "yt_dlp_update_required",
             "The installed yt-dlp version is rejected or too old for the current platform response. Run the fixed project updater and retry.",
-            message,
         ) from exc
     if _is_youtube_network_tls_error(message):
-        raise _yt_dlp_error(
+        raise _error(
             "youtube_network_tls_failed",
             (
                 "yt-dlp could not complete the TLS/network request to YouTube. "
                 "The video may still be public, but this runtime could not download the YouTube webpage/API response. "
                 "Retry later, switch network/IP, or provide a cookies.txt file from a browser session."
             ),
-            message,
         ) from exc
     restriction = _classified_restriction(message)
     if restriction:
         code, description = restriction
-        raise _yt_dlp_error(code, description, message) from exc
-    raise _yt_dlp_error(
-        code="yt_dlp_failed",
-        message="yt-dlp failed for an unclassified reason. Review details.error; the project does not infer that a public URL is private.",
-        raw_error=message,
+        raise _error(code, description) from exc
+    raise _error(
+        "yt_dlp_failed",
+        "yt-dlp failed for an unclassified reason. Review details.error; the project does not infer that a public URL is private.",
     ) from exc
 
 
@@ -864,6 +1069,16 @@ def ingest_video(
     prefer_subtitles_only: bool = False,
 ) -> Dict[str, Any]:
     paths.ensure()
+    try:
+        prepared_source = prepare_source_url(
+            url,
+            redirect_timeout_seconds=settings.ytdlp_redirect_timeout_seconds,
+            redirect_attempts=settings.ytdlp_extract_attempts,
+        )
+    except SourceUrlError as exc:
+        raise PipelineError(code=exc.code, message=exc.message, step="ingest", details=exc.details) from exc
+    source_context = prepared_source.diagnostics()
+    url = prepared_source.normalized_url
     try:
         import yt_dlp
     except Exception as exc:
@@ -877,10 +1092,25 @@ def ingest_video(
     subtitle_info: Optional[Dict[str, Any]] = None
     subtitle_path: Optional[Path] = None
     ingest_warnings: list[str] = []
-    preflight_opts = _base_ydl_opts(output_template, language, download=False)
+    preflight_opts = _base_ydl_opts(
+        output_template,
+        language,
+        download=False,
+        source_platform=prepared_source.source_platform,
+    )
     try:
-        with yt_dlp.YoutubeDL(preflight_opts) as ydl:
-            subtitle_info = _normalize_info(ydl.extract_info(url, download=True), url)
+        subtitle_info = _normalize_info(
+            _extract_info_with_retries(
+                yt_dlp,
+                preflight_opts,
+                url,
+                download=True,
+                phase="subtitle_metadata_preflight",
+            ),
+            url,
+            source_context,
+        )
+        _validate_source_extractor(subtitle_info, source_context)
         subtitle_path = _find_downloaded_subtitle(paths.source_dir, subtitle_info.get("id"))
         if prefer_subtitles_only and subtitle_path:
             return _write_metadata(
@@ -896,14 +1126,21 @@ def ingest_video(
                     )
                 ],
             )
+    except PipelineError:
+        raise
     except Exception as exc:
         message = str(exc)
         if _is_fresh_cookies_required(message) and _resolve_douyin_content_id(url):
             try:
-                return _download_douyin_public_video(url, paths, text_only=prefer_subtitles_only)
+                return _download_douyin_public_video(
+                    url,
+                    paths,
+                    text_only=prefer_subtitles_only,
+                    source_context=source_context,
+                )
             except PipelineError:
                 pass
-        if _should_try_public_android_fallback(message):
+        if prepared_source.source_platform == "youtube" and _should_try_public_android_fallback(message):
             ingest_warnings.append(
                 (
                     "The subtitle preflight step could not use the primary YouTube web-client media format. "
@@ -911,13 +1148,23 @@ def ingest_video(
                 )
             )
         else:
-            _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
+            _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template, source_context)
 
     if prefer_subtitles_only:
-        audio_opts = _audio_only_opts(output_template, language)
+        audio_opts = _audio_only_opts(output_template, language, prepared_source.source_platform)
         try:
-            with yt_dlp.YoutubeDL(audio_opts) as ydl:
-                audio_info = _normalize_info(ydl.extract_info(url, download=True), url)
+            audio_info = _normalize_info(
+                _extract_info_with_retries(
+                    yt_dlp,
+                    audio_opts,
+                    url,
+                    download=True,
+                    phase="text_only_audio_download",
+                ),
+                url,
+                source_context,
+            )
+            _validate_source_extractor(audio_info, source_context)
             video_id = audio_info.get("id")
             audio_path = _find_downloaded_audio(paths.source_dir, video_id)
             video_path = _find_downloaded_video(paths.source_dir, video_id)
@@ -958,6 +1205,8 @@ def ingest_video(
         except PipelineError as exc:
             if exc.code != "audio_file_missing":
                 raise
+            if prepared_source.source_platform != "youtube":
+                raise
             return _download_text_only_android_fallback(
                 yt_dlp,
                 url,
@@ -967,10 +1216,11 @@ def ingest_video(
                 subtitle_path,
                 ingest_warnings,
                 exc.message,
+                source_context,
             )
         except Exception as exc:
             message = str(exc)
-            if _should_try_public_android_fallback(message):
+            if prepared_source.source_platform == "youtube" and _should_try_public_android_fallback(message):
                 return _download_text_only_android_fallback(
                     yt_dlp,
                     url,
@@ -980,21 +1230,37 @@ def ingest_video(
                     subtitle_path,
                     ingest_warnings,
                     message,
+                    source_context,
                 )
-            _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
+            _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template, source_context)
 
-    ydl_opts = _base_ydl_opts(output_template, language, download=True)
+    ydl_opts = _base_ydl_opts(
+        output_template,
+        language,
+        download=True,
+        source_platform=prepared_source.source_platform,
+    )
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        info = _extract_info_with_retries(
+            yt_dlp,
+            ydl_opts,
+            url,
+            download=True,
+            phase="primary_media_download",
+        )
     except Exception as exc:
         message = str(exc)
-        if _should_try_public_android_fallback(message):
+        if prepared_source.source_platform == "youtube" and _should_try_public_android_fallback(message):
             fallback_opts = _public_android_fallback_opts(output_template, language)
             try:
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
+                info = _extract_info_with_retries(
+                    yt_dlp,
+                    fallback_opts,
+                    url,
+                    download=True,
+                    phase="youtube_android_media_fallback",
+                )
                 ingest_warnings.append(
                     (
                         "The primary YouTube web-client media download failed because the requested format was "
@@ -1005,9 +1271,10 @@ def ingest_video(
                 )
             except Exception:
                 if not (subtitle_info and subtitle_path):
-                    _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
+                    _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template, source_context)
             else:
-                info = _normalize_info(info, url)
+                info = _normalize_info(info, url, source_context)
+                _validate_source_extractor(info, source_context)
                 video_id = info.get("id")
                 video_path = _find_downloaded_video(paths.source_dir, video_id)
                 subtitle_path = _find_downloaded_subtitle(paths.source_dir, video_id) or subtitle_path
@@ -1056,9 +1323,10 @@ def ingest_video(
                     ],
                 )
                 return metadata
-        _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template)
+        _raise_ingest_ytdlp_error(message, exc, url, language, paths, output_template, source_context)
 
-    info = _normalize_info(info, url)
+    info = _normalize_info(info, url, source_context)
+    _validate_source_extractor(info, source_context)
 
     video_id = info.get("id")
     video_path = _find_downloaded_video(paths.source_dir, video_id)

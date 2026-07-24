@@ -117,7 +117,13 @@ def test_health_and_diagnostics():
     catalog = client.get("/api/errors/catalog")
     assert catalog.status_code == 200
     catalog_codes = {item["code"] for item in catalog.json()["errors"]}
-    assert {"yt_dlp_failed", "llm_contract_invalid", "body_too_short"} <= catalog_codes
+    assert {
+        "yt_dlp_failed",
+        "yt_dlp_generic_extractor_timeout",
+        "source_url_redirect_timeout",
+        "llm_contract_invalid",
+        "body_too_short",
+    } <= catalog_codes
 
     doctor = client.get("/api/system/doctor")
     assert doctor.status_code == 200

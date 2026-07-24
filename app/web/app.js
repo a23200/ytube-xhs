@@ -355,6 +355,7 @@ const state = {
   batches: [],
   batchDetail: null,
   batchPollTimer: null,
+  cookieStatuses: null,
 };
 
 function escapeHtml(value) {
@@ -561,10 +562,10 @@ function errorText(error) {
     return "YouTube 媒体流返回 403。链接可以公开查看，但当前运行环境被 YouTube 拒绝下载视频分片；系统会优先尝试使用真实字幕继续分析，若没有字幕则需要导出最新 cookies.txt 或换网络/IP 后重试。";
   }
   if (detail?.code === "youtube_bot_check_required") {
-    return "YouTube 要求登录确认不是机器人。请配置浏览器 Cookie（例如 XHS_YTDLP_COOKIES_FROM_BROWSER=chrome）或导出的 cookies.txt 后重试。";
+    return "YouTube 要求登录确认不是机器人。请到“平台账号”导入或上传 YouTube Cookie，并用当前视频链接验证后重试。";
   }
   if (detail?.code === "yt_dlp_cookies_required") {
-    return "平台要求使用最新浏览器 Cookie，即使公开视频也可能需要。服务与 Chrome 使用同一登录用户时可设置 XHS_YTDLP_COOKIES_FROM_BROWSER=chrome；无人值守服务建议导出最新 cookies.txt 并设置 XHS_YTDLP_COOKIES_FILE，重启后重试。";
+    return "平台要求使用最新浏览器 Cookie，即使公开视频也可能需要。请到“平台账号”选择来源平台，从本机浏览器导入或上传最新 cookies.txt，并验证当前链接。";
   }
   if (detail?.code === "youtube_network_tls_failed") {
     return "当前运行环境到 YouTube 的网络/TLS 请求失败，视频可能仍是公开的。请稍后重试、换网络/IP，或配置浏览器导出的 cookies.txt 后再跑。";
@@ -733,7 +734,10 @@ function readyForLabel(key) {
 }
 
 async function apiRequest(path, options = {}) {
-  const headers = options.body ? { "Content-Type": "application/json", ...(options.headers || {}) } : options.headers;
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  const headers = options.body && !isFormData
+    ? { "Content-Type": "application/json", ...(options.headers || {}) }
+    : options.headers;
   const response = await fetch(path, { ...options, headers });
   const text = await response.text();
   let body = text;
@@ -759,6 +763,13 @@ const apiPost = (path, body = {}) => apiRequest(path, { method: "POST", body: JS
 const apiPut = (path, body = {}) => apiRequest(path, { method: "PUT", body: JSON.stringify(body) });
 const apiPatch = (path, body = {}) => apiRequest(path, { method: "PATCH", body: JSON.stringify(body) });
 const apiDelete = (path) => apiRequest(path, { method: "DELETE" });
+const COOKIE_ACTION_HEADERS = { "X-YTXHS-Cookie-Action": "confirm" };
+const apiCookiePost = (path, body = {}) => apiRequest(path, {
+  method: "POST",
+  body: JSON.stringify(body),
+  headers: COOKIE_ACTION_HEADERS,
+});
+const apiCookieDelete = (path) => apiRequest(path, { method: "DELETE", headers: COOKIE_ACTION_HEADERS });
 
 async function apiFile(projectId, kind) {
   const response = await fetch(`/api/projects/${projectId}/files/${kind}`);
@@ -802,6 +813,7 @@ function routeInfo() {
     };
   }
   if (path === "/settings/llm") return { name: "llm", title: "LLM 配置", mark: "LLM" };
+  if (path === "/settings/accounts") return { name: "accounts", title: "平台账号", mark: "账" };
   if (path === "/settings/runtime") return { name: "runtime", title: "运行诊断", mark: "诊" };
   return { name: "not-found", title: "页面不存在", mark: "404" };
 }
@@ -817,6 +829,7 @@ function currentNavClass(name) {
   if (name === "batches" && ["batches", "batch-detail"].includes(route.name)) return "active";
   if (name === "projects" && ["projects", "project-detail"].includes(route.name)) return "active";
   if (name === "llm" && route.name === "llm") return "active";
+  if (name === "accounts" && route.name === "accounts") return "active";
   if (name === "runtime" && route.name === "runtime") return "active";
   return "";
 }
@@ -847,6 +860,9 @@ function shell({ title, subtitle, mark, actions = "", body = "" }) {
           <div class="nav-title">设置</div>
           <a class="nav-link ${currentNavClass("llm")}" href="/settings/llm" data-route="/settings/llm">
             <span class="nav-mark">L</span><span>LLM 配置</span>
+          </a>
+          <a class="nav-link ${currentNavClass("accounts")}" href="/settings/accounts" data-route="/settings/accounts">
+            <span class="nav-mark">账</span><span>平台账号</span>
           </a>
           <a class="nav-link ${currentNavClass("runtime")}" href="/settings/runtime" data-route="/settings/runtime">
             <span class="nav-mark">诊</span><span>运行诊断</span>
@@ -2423,6 +2439,220 @@ function renderPostTab(detail, route) {
   `;
 }
 
+function cookieStatusClass(status) {
+  if (status === "session_detected") return "status-ok";
+  if (status === "readable") return "status-warning";
+  if (["expired", "invalid"].includes(status)) return "status-error";
+  return "status-warning";
+}
+
+function cookieSourceLabel(source) {
+  const labels = {
+    managed: "平台独立文件",
+    platform_environment: "平台环境配置",
+    legacy_global: "旧版全局文件",
+    legacy_browser: "旧版浏览器读取",
+    none: "未配置",
+  };
+  return labels[source] || source || "未配置";
+}
+
+function cookieVerificationBlock(verification) {
+  if (!verification) return '<span class="muted">尚未验证</span>';
+  const status = verification.ok ? "验证通过" : "验证失败";
+  const detail = verification.ok
+    ? [verification.extractor, verification.title].filter(Boolean).join(" · ")
+    : (verification.error || "未返回实际错误");
+  return `
+    <div class="cookie-verification ${verification.ok ? "verification-ok" : "verification-failed"}">
+      <div class="row between wrap"><b>${status}</b><span>${escapeHtml(safeDate(verification.verified_at))}</span></div>
+      <p>${escapeHtml(detail)}</p>
+    </div>
+  `;
+}
+
+function renderCookiePlatform(platform, browsers) {
+  const browserOptions = (browsers || ["chrome"]).map((browser) => `
+    <option value="${escapeHtml(browser)}" ${browser === "chrome" ? "selected" : ""}>${escapeHtml(browser)}</option>
+  `).join("");
+  const domains = Array.isArray(platform.domains) && platform.domains.length
+    ? platform.domains.map((domain) => `<span class="mini-pill">${escapeHtml(domain)}</span>`).join("")
+    : '<span class="muted">暂无平台域 Cookie</span>';
+  return `
+    <section class="panel cookie-platform" data-cookie-platform="${escapeHtml(platform.platform)}">
+      <div class="panel-header">
+        <div><h3>${escapeHtml(platform.name)}</h3><p>${escapeHtml(cookieSourceLabel(platform.source))}</p></div>
+        <span class="status-pill ${cookieStatusClass(platform.status)}">${escapeHtml(platform.status_label || platform.status)}</span>
+      </div>
+      <div class="panel-body stack">
+        <div class="meta-grid cookie-meta-grid">
+          <div class="meta-item"><span>有效 Cookie</span><b>${escapeHtml(platform.valid_cookie_count ?? platform.cookie_count ?? 0)}</b></div>
+          <div class="meta-item"><span>登录会话标记</span><b>${escapeHtml(platform.auth_cookie_count ?? 0)}</b></div>
+          <div class="meta-item"><span>已过期</span><b>${escapeHtml(platform.expired_cookie_count ?? 0)}</b></div>
+          <div class="meta-item"><span>最近到期</span><b>${escapeHtml(platform.earliest_expiry ? safeDate(platform.earliest_expiry) : "会话/未知")}</b></div>
+        </div>
+        <div class="cookie-domains">${domains}</div>
+        ${platform.error ? `<div class="inline-error"><b>${escapeHtml(platform.error.message)}</b><code>${escapeHtml(platform.error.details?.error || "")}</code></div>` : ""}
+        ${cookieVerificationBlock(platform.last_verification)}
+        <div class="cookie-login-actions">
+          <a class="ghost-button" href="${escapeHtml(platform.login_url)}" target="_blank" rel="noopener noreferrer">打开登录页</a>
+          <button class="ghost-button" data-action="delete-platform-cookie" data-platform="${escapeHtml(platform.platform)}" type="button" ${platform.source !== "managed" ? "disabled" : ""}>删除平台文件</button>
+        </div>
+        <div class="cookie-control-band">
+          <div class="field-row">
+            <label class="field">浏览器
+              <select id="cookie-browser-${escapeHtml(platform.platform)}">${browserOptions}</select>
+            </label>
+            <label class="field">Profile
+              <input id="cookie-profile-${escapeHtml(platform.platform)}" placeholder="留空使用默认 Profile" />
+            </label>
+          </div>
+          <button class="button" data-action="import-browser-cookie" data-platform="${escapeHtml(platform.platform)}" type="button">从本机浏览器导入并检测</button>
+        </div>
+        <form class="cookie-upload-form cookie-control-band" data-platform="${escapeHtml(platform.platform)}">
+          <label class="field">Netscape cookies.txt
+            <input name="file" type="file" accept=".txt,text/plain" required />
+          </label>
+          <button class="ghost-button" type="submit">上传并保存</button>
+        </form>
+        <div class="cookie-control-band">
+          <label class="field">验证视频链接
+            <input id="cookie-verify-url-${escapeHtml(platform.platform)}" placeholder="粘贴该平台可访问的视频链接" />
+          </label>
+          <button class="ghost-button" data-action="verify-platform-cookie" data-platform="${escapeHtml(platform.platform)}" type="button">验证 Cookie</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+async function renderCookieAccounts() {
+  shell({
+    title: "平台账号与 Cookie",
+    mark: "账",
+    subtitle: "YouTube、抖音、哔哩哔哩和今日头条独立管理。",
+    body: loadingPanel("平台账号"),
+  });
+  try {
+    state.cookieStatuses = await apiGet("/api/auth/cookies");
+  } catch (error) {
+    shell({ title: "平台账号与 Cookie", mark: "账", subtitle: "Cookie 状态读取失败。", body: errorState(errorText(error)) });
+    return;
+  }
+  shell({
+    title: "平台账号与 Cookie",
+    mark: "账",
+    subtitle: "Cookie 按来源平台隔离保存，任务会根据视频链接自动选择。",
+    actions: `<button class="ghost-button" data-action="refresh-accounts" type="button">刷新状态</button>`,
+    body: `
+      <div class="grid">
+        <section class="panel pad cookie-security-bar">
+          <div><b>Cookie 值不通过网页回显，文件权限固定为 0600。</b><p>在服务所在 Mac 登录后可直接导入；远程浏览此页面时，请在已登录设备导出 Netscape cookies.txt 后上传。</p></div>
+          <code>${escapeHtml(state.cookieStatuses.auth_dir || "runtime/auth")}</code>
+        </section>
+        <div id="cookie-action-message"></div>
+        <div class="cookie-platform-grid">
+          ${(state.cookieStatuses.platforms || []).map((platform) => renderCookiePlatform(platform, state.cookieStatuses.supported_browsers)).join("")}
+        </div>
+      </div>
+    `,
+  });
+}
+
+function cookieActionError(error) {
+  const detail = error?.body?.detail || {};
+  const details = detail.details || {};
+  return {
+    message: detail.message || errorText(error),
+    actual: details.error || (Array.isArray(details.browser_messages) ? details.browser_messages.join("\n") : ""),
+  };
+}
+
+function setCookieActionMessage(kind, title, detail = "") {
+  const target = document.querySelector("#cookie-action-message");
+  if (!target) return;
+  target.innerHTML = `
+    <section class="panel pad cookie-action-result ${kind === "error" ? "result-error" : "result-ok"}">
+      <b>${escapeHtml(title)}</b>
+      ${detail ? `<pre>${escapeHtml(detail)}</pre>` : ""}
+    </section>
+  `;
+  target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function importBrowserCookie(platform, button) {
+  const browser = document.querySelector(`#cookie-browser-${platform}`)?.value || "chrome";
+  const profile = document.querySelector(`#cookie-profile-${platform}`)?.value?.trim() || null;
+  button.disabled = true;
+  try {
+    const result = await apiCookiePost("/api/auth/cookies/import-browser", { platform, browser, profile });
+    await renderCookieAccounts();
+    setCookieActionMessage("ok", `${result.name || platform} Cookie 已导入`, `已保存 ${result.imported_cookie_count || 0} 条平台 Cookie。`);
+  } catch (error) {
+    const failure = cookieActionError(error);
+    setCookieActionMessage("error", failure.message, failure.actual);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function uploadPlatformCookie(form) {
+  const platform = form.dataset.platform;
+  const formData = new FormData(form);
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await apiRequest(`/api/auth/cookies/${platform}/upload`, {
+      method: "POST",
+      body: formData,
+      headers: COOKIE_ACTION_HEADERS,
+    });
+    await renderCookieAccounts();
+    setCookieActionMessage("ok", `${result.name || platform} Cookie 已保存`, `已导入 ${result.imported_cookie_count || 0} 条平台 Cookie。`);
+  } catch (error) {
+    const failure = cookieActionError(error);
+    setCookieActionMessage("error", failure.message, failure.actual);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function verifyPlatformCookie(platform, button) {
+  const input = document.querySelector(`#cookie-verify-url-${platform}`);
+  const url = input?.value?.trim() || "";
+  if (!url) {
+    setCookieActionMessage("error", "请先填写该平台的视频链接");
+    input?.focus();
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await apiCookiePost("/api/auth/cookies/verify", { platform, url });
+    const verification = result.verification || {};
+    await renderCookieAccounts();
+    setCookieActionMessage("ok", `${result.name || platform} Cookie 验证通过`, [verification.extractor, verification.title].filter(Boolean).join(" · "));
+  } catch (error) {
+    const failure = cookieActionError(error);
+    setCookieActionMessage("error", failure.message, failure.actual);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deletePlatformCookie(platform, button) {
+  if (!window.confirm("删除该平台由本项目管理的 Cookie 文件？")) return;
+  button.disabled = true;
+  try {
+    await apiCookieDelete(`/api/auth/cookies/${platform}`);
+    await renderCookieAccounts();
+  } catch (error) {
+    const failure = cookieActionError(error);
+    setCookieActionMessage("error", failure.message, failure.actual);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderFilesTab(detail) {
   const outputs = detail.status.outputs || {};
   const textOnly = isTextOnlyProject(detail);
@@ -2665,6 +2895,7 @@ async function renderRoute() {
   if (route.name === "projects") return renderProjects();
   if (route.name === "project-detail") return renderProjectDetail(route.projectId);
   if (route.name === "llm") return renderLlmSettings();
+  if (route.name === "accounts") return renderCookieAccounts();
   if (route.name === "runtime") return renderRuntimeDoctor();
   return renderNotFound();
 }
@@ -3196,6 +3427,10 @@ document.addEventListener("submit", (event) => {
     event.preventDefault();
     saveImageSettings(form);
   }
+  if (form.classList.contains("cookie-upload-form")) {
+    event.preventDefault();
+    uploadPlatformCookie(form);
+  }
 });
 
 document.addEventListener("click", async (event) => {
@@ -3227,7 +3462,7 @@ document.addEventListener("click", async (event) => {
   if (action === "close-modal") {
     if (event.target.classList.contains("modal-backdrop") || event.target.closest("button")) closeModal();
   }
-  if (action === "refresh-dashboard" || action === "refresh-batches" || action === "refresh-projects" || action === "refresh-runtime") await renderRoute();
+  if (action === "refresh-dashboard" || action === "refresh-batches" || action === "refresh-projects" || action === "refresh-runtime" || action === "refresh-accounts") await renderRoute();
   if (action === "set-content-route") {
     setContentRoute(actionNode.dataset.routeKey);
     await renderDashboard();
@@ -3256,6 +3491,9 @@ document.addEventListener("click", async (event) => {
   if (action === "test-llm") await runLlmSelfTest();
   if (action === "test-image-api") await runImageSelfTest(false);
   if (action === "test-image-api-real") await runImageSelfTest(true);
+  if (action === "import-browser-cookie") await importBrowserCookie(actionNode.dataset.platform, actionNode);
+  if (action === "verify-platform-cookie") await verifyPlatformCookie(actionNode.dataset.platform, actionNode);
+  if (action === "delete-platform-cookie") await deletePlatformCookie(actionNode.dataset.platform, actionNode);
 });
 
 document.addEventListener("input", (event) => {
