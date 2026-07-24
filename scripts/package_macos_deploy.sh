@@ -44,7 +44,9 @@ mkdir -p "$BUILD_DIR"
 echo "Building deployment package: $PACKAGE_NAME"
 
 rsync -a \
+  --exclude '.git' \
   --exclude '.git/' \
+  --exclude '.venv' \
   --exclude '.venv/' \
   --exclude '.env' \
   --exclude 'runtime/' \

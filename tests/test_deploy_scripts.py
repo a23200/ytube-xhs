@@ -123,6 +123,10 @@ cp "${YTXHS_TEST_INSTALLER:?}" "${output:?missing curl output}"
 
 
 def test_macos_deploy_package_excludes_local_state_and_secrets(tmp_path):
+    package_script = (ROOT / "scripts/package_macos_deploy.sh").read_text(encoding="utf-8")
+    assert "--exclude '.git'" in package_script
+    assert "--exclude '.venv'" in package_script
+
     dist_dir = ROOT / "dist"
     before = set(dist_dir.glob("ytube-xhs-macmini-*.tar.gz")) if dist_dir.exists() else set()
     env = {**os.environ, "TMPDIR": str(tmp_path)}
