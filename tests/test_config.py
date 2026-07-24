@@ -23,6 +23,7 @@ def test_settings_read_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("XHS_YTDLP_SOCKET_TIMEOUT_SECONDS", "42")
     monkeypatch.setenv("XHS_YTDLP_REDIRECT_TIMEOUT_SECONDS", "9")
     monkeypatch.setenv("XHS_YTDLP_EXTRACT_ATTEMPTS", "4")
+    monkeypatch.setenv("XHS_YTDLP_BROWSER_COOKIE_TIMEOUT_SECONDS", "55")
 
     settings = Settings()
 
@@ -42,6 +43,7 @@ def test_settings_read_environment(monkeypatch, tmp_path):
     assert settings.ytdlp_socket_timeout_seconds == 42
     assert settings.ytdlp_redirect_timeout_seconds == 9
     assert settings.ytdlp_extract_attempts == 4
+    assert settings.ytdlp_browser_cookie_timeout_seconds == 55
 
 
 def test_settings_invalid_int_env_uses_default(monkeypatch):

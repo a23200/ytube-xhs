@@ -108,7 +108,7 @@ cp .env.example .env
 应用启动时会自动读取项目根目录 `.env`，已有系统环境变量优先级更高。
 `XHS_RUNTIME_DIR` 支持绝对路径或相对路径；相对路径会按项目根目录解析，默认写入 `./runtime`。
 
-YouTube、抖音、哔哩哔哩和今日头条使用独立 Cookie 文件。打开 `/settings/accounts` 可查看每个平台的未配置、可读取、检测到登录会话、过期或验证失败状态；可打开官方登录页、从服务所在 Mac 的浏览器导入、上传 Netscape `cookies.txt`，并用实际失败链接验证。文件保存在 `runtime/auth/{platform}.cookies.txt`，目录权限 `0700`、文件权限 `0600`，接口和日志不会返回 Cookie 值。旧版 `XHS_YTDLP_COOKIES_FILE` / `XHS_YTDLP_COOKIES_FROM_BROWSER` 仍兼容，但平台独立文件优先，且已有文件时不会再次读取整个浏览器 Cookie 库。
+YouTube、抖音、哔哩哔哩和今日头条使用独立 Cookie 文件。打开 `/settings/accounts` 可查看每个平台的未配置、可读取、检测到登录会话、过期或验证失败状态；可打开官方登录页、从服务所在 Mac 的浏览器导入、上传 Netscape `cookies.txt`，并用实际失败链接验证。浏览器导入以服务账户的系统主目录为准，发现并逐个检测本机可读 Chrome Profile，再用 Profile 绝对路径读取；也支持从下拉菜单指定 Profile。读取在独立子进程中执行，页面立即显示服务用户、用户目录、Profile 和进度，默认 45 秒超时，避免 Chrome 钥匙串读取无限阻塞。文件保存在 `runtime/auth/{platform}.cookies.txt`，目录权限 `0700`、文件权限 `0600`，接口和日志不会返回 Cookie 值。旧版 `XHS_YTDLP_COOKIES_FILE` / `XHS_YTDLP_COOKIES_FROM_BROWSER` 仍兼容，但平台独立文件优先，且已有文件时不会再次读取整个浏览器 Cookie 库。
 
 短链会先经过受控跳转和平台域校验，再交给 yt-dlp；已知平台 URL 如果落入 `[generic]` 提取器会返回独立错误，而不会被笼统归为网络超时。`XHS_YTDLP_REDIRECT_TIMEOUT_SECONDS` 控制短链单次超时，`XHS_YTDLP_EXTRACT_ATTEMPTS` 控制页面/媒体阶段的瞬时网络重试次数。
 

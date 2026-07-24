@@ -1,4 +1,5 @@
 import os
+import pwd
 import sys
 import types
 from pathlib import Path
@@ -124,6 +125,132 @@ def test_cookie_error_redaction_removes_headers_and_sensitive_query_values():
     assert "<redacted>" in redacted
 
 
+def test_discover_chrome_profiles_with_cookie_databases(tmp_path, monkeypatch):
+    chrome_root = tmp_path / "Library" / "Application Support" / "Google" / "Chrome"
+    default_cookie = chrome_root / "Default" / "Network" / "Cookies"
+    profile_cookie = chrome_root / "Profile 2" / "Network" / "Cookies"
+    default_cookie.parent.mkdir(parents=True)
+    profile_cookie.parent.mkdir(parents=True)
+    default_cookie.write_bytes(b"")
+    profile_cookie.write_bytes(b"")
+    os.utime(profile_cookie, (200, 200))
+    os.utime(default_cookie, (100, 100))
+    monkeypatch.setattr(cookie_manager, "service_home", lambda: tmp_path)
+
+    assert cookie_manager.discover_browser_profiles("chrome") == ["Profile 2", "Default"]
+
+
+def test_service_home_uses_account_record_instead_of_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert cookie_manager.service_home() == Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve()
+
+
+def test_resolved_chrome_profile_uses_service_account_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(cookie_manager, "service_home", lambda: tmp_path)
+
+    resolved = cookie_manager._resolved_browser_profile("chrome", "Profile 3")
+
+    assert resolved == tmp_path / "Library" / "Application Support" / "Google" / "Chrome" / "Profile 3"
+
+
+def test_browser_export_auto_checks_all_detected_profiles(tmp_path, monkeypatch):
+    seen_profiles = []
+
+    class FakeYoutubeDL:
+        def __init__(self, _options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_load_cookies(_cookie_file, browser_spec, _ydl):
+        profile = browser_spec[1]
+        seen_profiles.append(profile)
+        if Path(profile).name == "Profile 1":
+            return []
+        return [
+            types.SimpleNamespace(
+                domain=".douyin.com",
+                domain_initial_dot=True,
+                path="/",
+                secure=True,
+                expires=4102444800,
+                name="sessionid",
+                value="auto-profile-secret",
+                _rest={},
+            )
+        ]
+
+    fake_yt_dlp = types.ModuleType("yt_dlp")
+    fake_yt_dlp.YoutubeDL = FakeYoutubeDL
+    fake_cookies = types.ModuleType("yt_dlp.cookies")
+    fake_cookies.load_cookies = fake_load_cookies
+    monkeypatch.setitem(sys.modules, "yt_dlp", fake_yt_dlp)
+    monkeypatch.setitem(sys.modules, "yt_dlp.cookies", fake_cookies)
+    monkeypatch.setattr(cookie_manager, "discover_browser_profiles", lambda _browser: ["Profile 1", "Profile 2"])
+    monkeypatch.setattr(cookie_manager, "service_home", lambda: tmp_path)
+    output = tmp_path / "export.cookies.txt"
+
+    result = cookie_manager.export_browser_cookie_file("douyin", "chrome", None, output)
+
+    chrome_root = tmp_path / "Library" / "Application Support" / "Google" / "Chrome"
+    assert seen_profiles == [str(chrome_root / "Profile 1"), str(chrome_root / "Profile 2")]
+    assert result["profile"] == "Profile 2"
+    assert result["profiles_checked"] == ["Profile 1", "Profile 2"]
+    assert "auto-profile-secret" in output.read_text(encoding="utf-8")
+
+
+def test_browser_import_runs_in_isolated_worker_and_saves_filtered_cookie(isolated_auth, monkeypatch):
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed.update(kwargs)
+        output = Path(command[command.index("--output") + 1])
+        output.write_bytes(
+            _cookie_text(".douyin.com\tTRUE\t/\tTRUE\t4102444800\tsessionid\tworker-secret")
+        )
+        return cookie_manager.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"ok": true, "result": {"profile": "Profile 1", "profiles_checked": ["Profile 1"]}}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(cookie_manager.subprocess, "run", fake_run)
+    monkeypatch.setattr(cookie_manager.settings, "ytdlp_browser_cookie_timeout_seconds", 17)
+
+    result = cookie_manager.import_from_browser("douyin", "chrome", "Profile 1")
+
+    assert result["status"] == "session_detected"
+    assert result["profile"] == "Profile 1"
+    assert result["profiles_checked"] == ["Profile 1"]
+    assert result["imported_cookie_count"] == 1
+    assert observed["timeout"] == 17
+    assert observed["env"]["HOME"] == str(cookie_manager.service_home())
+    assert "worker-secret" not in str(result)
+    assert cookie_manager.managed_cookie_path("douyin").stat().st_mode & 0o777 == 0o600
+
+
+def test_browser_import_timeout_returns_actionable_error(isolated_auth, monkeypatch):
+    def fake_run(command, **kwargs):
+        raise cookie_manager.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(cookie_manager.subprocess, "run", fake_run)
+    monkeypatch.setattr(cookie_manager.settings, "ytdlp_browser_cookie_timeout_seconds", 23)
+
+    with pytest.raises(cookie_manager.CookieManagerError) as exc_info:
+        cookie_manager.import_from_browser("douyin", "chrome")
+
+    assert exc_info.value.code == "cookie_browser_import_timeout"
+    assert exc_info.value.details["timeout_seconds"] == 23
+    assert exc_info.value.details["service_user"]
+    assert not cookie_manager.managed_cookie_path("douyin").exists()
+
+
 def test_cookie_api_requires_confirmation_and_does_not_expose_values(isolated_auth):
     client = TestClient(app)
     content = _cookie_text(".youtube.com\tTRUE\t/\tTRUE\t4102444800\tLOGIN_INFO\tapi-secret")
@@ -149,6 +276,9 @@ def test_cookie_api_requires_confirmation_and_does_not_expose_values(isolated_au
     assert statuses.status_code == 200
     assert statuses.headers["content-type"] == "application/json; charset=utf-8"
     assert len(statuses.json()["platforms"]) == 4
+    assert statuses.json()["browser_import"]["service_user"]
+    assert statuses.json()["browser_import"]["service_home"]
+    assert statuses.json()["browser_import"]["timeout_seconds"] >= 10
     assert deleted.status_code == 200
     assert "api-secret" not in uploaded.text
     assert "api-secret" not in statuses.text

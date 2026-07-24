@@ -389,6 +389,19 @@ img {
   white-space: nowrap;
 }
 
+.cookie-runtime-details {
+  display: grid;
+  flex: 0 1 420px;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.cookie-runtime-details code {
+  max-width: 100%;
+}
+
 .meta-grid.cookie-meta-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -451,6 +464,10 @@ img {
   border-left-color: var(--danger);
 }
 
+.cookie-action-result.result-pending {
+  border-left-color: var(--warning);
+}
+
 .cookie-action-result pre {
   max-height: 180px;
   margin: 10px 0 0;
@@ -487,6 +504,10 @@ img {
 
   .cookie-security-bar code {
     max-width: 100%;
+  }
+
+  .cookie-runtime-details {
+    text-align: left;
   }
 
   .meta-grid.cookie-meta-grid {

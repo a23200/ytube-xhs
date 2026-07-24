@@ -125,6 +125,11 @@ def test_web_ui_serves_required_controls_and_assets():
         "renderCookieAccounts",
         "cookie-upload-form",
         "import-browser-cookie",
+        "正在读取浏览器 Cookie",
+        "browser_import",
+        "service_home",
+        "browser_profiles",
+        "自动检测全部 Profile",
         "verify-platform-cookie",
         "X-YTXHS-Cookie-Action",
         "frontend_backend_version_mismatch",
@@ -200,5 +205,7 @@ def test_web_ui_serves_required_controls_and_assets():
         ".cookie-platform-grid",
         ".cookie-control-band",
         ".cookie-verification",
+        ".cookie-runtime-details",
+        ".cookie-action-result.result-pending",
     ]:
         assert required in css

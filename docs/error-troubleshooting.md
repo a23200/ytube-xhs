@@ -29,6 +29,7 @@
 | `youtube_bot_check_required` | YouTube 要求登录确认不是机器人 | 到“平台账号”导入/上传 YouTube Cookie，用失败链接验证；仍失败时切换网络/IP |
 | `yt_dlp_cookies_required` | 平台明确要求近期 Cookie | 到“平台账号”选择来源平台，从本机浏览器导入或上传 Netscape `cookies.txt` |
 | `yt_dlp_cookies_invalid` | Cookie 过期、格式错误或服务用户无法读取 | 查看平台状态并重新导入；launchd 无法读取钥匙串时改用文件上传 |
+| `cookie_browser_import_timeout` | 本机浏览器 Cookie/钥匙串读取超过限定时间 | 核对页面中的服务用户和 Chrome Profile，解锁登录钥匙串；仍失败时导出 Netscape `cookies.txt` 上传 |
 | `youtube_media_download_forbidden` | YouTube 视频分片返回 403 | 更新 Cookie、切换网络；纯文案任务优先选有公开字幕的视频 |
 | `yt_dlp_access_forbidden` | 平台网页、API 或媒体请求返回 403 | 查看 `actual_error` 确认被拒绝的请求，再更新 Cookie/yt-dlp 或切换网络 |
 | `yt_dlp_rate_limited` | 平台返回 429/请求过快 | 暂停请求、降低并发、换稳定网络后重试 |

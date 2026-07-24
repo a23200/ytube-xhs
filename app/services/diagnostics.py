@@ -231,5 +231,6 @@ def _yt_dlp_status() -> Dict[str, Any]:
         "socket_timeout_seconds": settings.ytdlp_socket_timeout_seconds,
         "redirect_timeout_seconds": settings.ytdlp_redirect_timeout_seconds,
         "extract_attempts": settings.ytdlp_extract_attempts,
+        "browser_cookie_timeout_seconds": settings.ytdlp_browser_cookie_timeout_seconds,
     }
     return status

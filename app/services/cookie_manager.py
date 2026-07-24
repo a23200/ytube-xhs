@@ -1,6 +1,9 @@
+import getpass
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -22,6 +25,13 @@ from app.services.source_urls import (
 
 MAX_COOKIE_FILE_BYTES = 5 * 1024 * 1024
 SUPPORTED_BROWSER_IMPORTS = ("chrome", "chromium", "brave", "edge", "safari", "firefox")
+
+_MACOS_BROWSER_ROOTS = {
+    "chrome": "Google/Chrome",
+    "chromium": "Chromium",
+    "brave": "BraveSoftware/Brave-Browser",
+    "edge": "Microsoft Edge",
+}
 
 AUTH_COOKIE_NAMES = {
     "youtube": {"SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO", "__Secure-3PSID", "__Secure-3PAPISID"},
@@ -80,6 +90,25 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def service_user() -> str:
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.geteuid()).pw_name
+    except (ImportError, KeyError, OSError):
+        return getpass.getuser()
+
+
+def service_home() -> Path:
+    try:
+        import pwd
+
+        home = pwd.getpwuid(os.geteuid()).pw_dir
+    except (ImportError, KeyError, OSError):
+        home = os.getenv("HOME") or str(Path.home())
+    return Path(home).expanduser().resolve()
+
+
 def _validate_platform(platform: str) -> str:
     normalized = str(platform or "").strip().lower()
     if normalized not in SUPPORTED_SOURCE_PLATFORMS:
@@ -107,6 +136,66 @@ def auth_dir() -> Path:
 
 def managed_cookie_path(platform: str) -> Path:
     return auth_dir() / f"{_validate_platform(platform)}.cookies.txt"
+
+
+def _browser_profile_root(browser: str) -> Optional[Path]:
+    home = service_home()
+    if browser == "firefox":
+        return home / "Library" / "Application Support" / "Firefox" / "Profiles"
+    relative_root = _MACOS_BROWSER_ROOTS.get(browser)
+    if relative_root:
+        return home / "Library" / "Application Support" / relative_root
+    return None
+
+
+def _resolved_browser_profile(browser: str, profile: Optional[str]) -> Optional[Path]:
+    if not profile:
+        return None
+    profile_path = Path(profile).expanduser()
+    if profile_path.is_absolute():
+        return profile_path.resolve()
+    if ".." in profile_path.parts:
+        raise CookieManagerError(
+            "cookie_browser_profile_invalid",
+            "The browser Profile must be a discovered Profile name or an absolute path.",
+            {"browser": browser, "profile": profile},
+        )
+    root = _browser_profile_root(browser)
+    return (root / profile_path).resolve() if root else profile_path.resolve()
+
+
+def discover_browser_profiles(browser: str) -> list[str]:
+    browser = str(browser or "").strip().lower()
+    if browser not in SUPPORTED_BROWSER_IMPORTS:
+        return []
+    if browser == "firefox":
+        database_names = ("cookies.sqlite",)
+    elif browser in _MACOS_BROWSER_ROOTS:
+        database_names = ("Network/Cookies", "Cookies")
+    else:
+        return []
+    root = _browser_profile_root(browser)
+    if root is None:
+        return []
+    if not root.is_dir():
+        return []
+    found = []
+    try:
+        directories = [item for item in root.iterdir() if item.is_dir()]
+    except OSError:
+        return []
+    for directory in directories:
+        databases = [directory / relative for relative in database_names]
+        readable = [path for path in databases if path.is_file() and os.access(path, os.R_OK)]
+        if not readable:
+            continue
+        try:
+            modified = max(path.stat().st_mtime for path in readable)
+        except OSError:
+            modified = 0.0
+        found.append((modified, directory.name))
+    found.sort(key=lambda item: (-item[0], item[1].lower()))
+    return [name for _modified, name in found]
 
 
 def _configured_platform_cookie_path(platform: str) -> Optional[Path]:
@@ -374,6 +463,14 @@ def list_cookie_statuses() -> dict:
     return {
         "platforms": [cookie_status(platform) for platform in SUPPORTED_SOURCE_PLATFORMS],
         "supported_browsers": list(SUPPORTED_BROWSER_IMPORTS),
+        "browser_profiles": {
+            browser: discover_browser_profiles(browser) for browser in SUPPORTED_BROWSER_IMPORTS
+        },
+        "browser_import": {
+            "service_user": service_user(),
+            "service_home": str(service_home()),
+            "timeout_seconds": settings.ytdlp_browser_cookie_timeout_seconds,
+        },
         "auth_dir": str(auth_dir()),
         "security": {
             "cookie_values_exposed": False,
@@ -427,7 +524,7 @@ class _CaptureLogger:
         self.messages.append(sanitize_error_text(message))
 
 
-def import_from_browser(platform: str, browser: str, profile: Optional[str] = None) -> dict:
+def _browser_import_parameters(platform: str, browser: str, profile: Optional[str]) -> tuple[str, str, Optional[str]]:
     platform = _validate_platform(platform)
     browser = str(browser or "").strip().lower()
     if browser not in SUPPORTED_BROWSER_IMPORTS:
@@ -439,57 +536,239 @@ def import_from_browser(platform: str, browser: str, profile: Optional[str] = No
     profile = str(profile or "").strip() or None
     if profile and (len(profile) > 256 or "\x00" in profile):
         raise CookieManagerError("cookie_browser_profile_invalid", "The browser profile name or path is invalid.")
-    logger = _CaptureLogger()
+    return platform, browser, profile
+
+
+def export_browser_cookie_file(
+    platform: str,
+    browser: str,
+    profile: Optional[str],
+    output_path: Path,
+) -> dict:
+    platform, browser, profile = _browser_import_parameters(platform, browser, profile)
     try:
         from yt_dlp import YoutubeDL
         from yt_dlp.cookies import load_cookies
+    except Exception as exc:
+        raise CookieManagerError(
+            "cookie_browser_import_failed",
+            "The isolated browser Cookie reader could not load yt-dlp.",
+            {"browser": browser, "profile": profile, "error": sanitize_error_text(exc)},
+        ) from exc
 
-        browser_spec = (browser, profile, None, None)
-        with YoutubeDL({"quiet": True, "no_warnings": True, "logger": logger}) as ydl:
-            jar = load_cookies(None, browser_spec, ydl)
-        rows = []
-        for item in jar:
-            row = CookieRow(
-                domain=str(item.domain or ""),
-                include_subdomains=bool(item.domain_initial_dot),
-                path=str(item.path or "/"),
-                secure=bool(item.secure),
-                expires=int(item.expires or 0),
-                name=str(item.name or ""),
-                value=str(item.value or ""),
-                http_only=bool((item._rest or {}).get("HttpOnly")),
+    candidates: list[Optional[str]] = [profile] if profile else list(discover_browser_profiles(browser))
+    if not candidates:
+        candidates = [None]
+    checked = []
+    failures = []
+    readable_profiles = 0
+    for candidate in candidates:
+        label = candidate or "automatic"
+        checked.append(label)
+        logger = _CaptureLogger()
+        try:
+            resolved_profile = _resolved_browser_profile(browser, candidate)
+            browser_spec = (browser, str(resolved_profile) if resolved_profile else None, None, None)
+            with YoutubeDL({"quiet": True, "no_warnings": True, "logger": logger}) as ydl:
+                jar = load_cookies(None, browser_spec, ydl)
+            readable_profiles += 1
+            rows = []
+            for item in jar:
+                row = CookieRow(
+                    domain=str(item.domain or ""),
+                    include_subdomains=bool(item.domain_initial_dot),
+                    path=str(item.path or "/"),
+                    secure=bool(item.secure),
+                    expires=int(item.expires or 0),
+                    name=str(item.name or ""),
+                    value=str(item.value or ""),
+                    http_only=bool((item._rest or {}).get("HttpOnly")),
+                )
+                if row.name and platform_domain_matches(platform, row.domain):
+                    rows.append(row)
+            rows = _platform_rows(rows, platform)
+            if not rows:
+                continue
+            _atomic_write_cookie_file(output_path, rows)
+            return {
+                "platform": platform,
+                "browser": browser,
+                "profile": candidate,
+                "profiles_checked": checked,
+                "cookie_count": len(rows),
+            }
+        except Exception as exc:
+            failures.append(
+                {
+                    "profile": label,
+                    "error": sanitize_error_text(exc),
+                    "browser_messages": [message for message in logger.messages[-3:] if message],
+                }
             )
-            if row.name and platform_domain_matches(platform, row.domain):
-                rows.append(row)
-        rows = _platform_rows(rows, platform)
+    if readable_profiles:
+        raise CookieManagerError(
+            "cookie_browser_platform_missing",
+            (
+                f"No {PLATFORM_NAMES[platform]} Cookies were found in the checked {browser} Profiles. "
+                "Select the Profile shown by chrome://version, or upload a Netscape cookies.txt file."
+            ),
+            {
+                "platform": platform,
+                "browser": browser,
+                "profile": profile,
+                "profiles_checked": checked,
+            },
+        )
+    raise CookieManagerError(
+        "cookie_browser_import_failed",
+        (
+            "The service could not read any detected browser Profile. Confirm the displayed service user owns the browser "
+            "Profile and can unlock the macOS login keychain, or upload a Netscape cookies.txt file."
+        ),
+        {
+            "browser": browser,
+            "profile": profile,
+            "profiles_checked": checked,
+            "browser_failures": failures[-5:],
+        },
+    )
+
+
+def _worker_error(completed: subprocess.CompletedProcess[str], browser: str, profile: Optional[str]) -> CookieManagerError:
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except ValueError:
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict) and error.get("code") and error.get("message"):
+        details = dict(error.get("details") or {})
+        details.setdefault("service_user", service_user())
+        details.setdefault("service_home", str(service_home()))
+        return CookieManagerError(str(error["code"]), str(error["message"]), details)
+    return CookieManagerError(
+        "cookie_browser_import_failed",
+        (
+            "The browser Cookie reader failed. Confirm the browser Profile and macOS service user; "
+            "if launchd cannot unlock the browser keychain, upload a Netscape cookies.txt file instead."
+        ),
+        {
+            "browser": browser,
+            "profile": profile,
+            "service_user": service_user(),
+            "service_home": str(service_home()),
+            "error": sanitize_error_text(completed.stderr or completed.stdout or "browser Cookie worker failed")[-2000:],
+        },
+    )
+
+
+def import_from_browser(platform: str, browser: str, profile: Optional[str] = None) -> dict:
+    platform, browser, profile = _browser_import_parameters(platform, browser, profile)
+    timeout_seconds = settings.ytdlp_browser_cookie_timeout_seconds
+    project_root = Path(__file__).resolve().parents[2]
+    with tempfile.TemporaryDirectory(prefix=".browser-import.", dir=auth_dir()) as temporary_dir:
+        output_path = Path(temporary_dir) / f"{platform}.cookies.txt"
+        command = [
+            sys.executable,
+            "-m",
+            "app.services.browser_cookie_worker",
+            "--platform",
+            platform,
+            "--browser",
+            browser,
+            "--output",
+            str(output_path),
+        ]
+        if profile:
+            command.extend(("--profile", profile))
+        try:
+            worker_env = {**os.environ, "HOME": str(service_home())}
+            completed = subprocess.run(
+                command,
+                cwd=project_root,
+                env=worker_env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CookieManagerError(
+                "cookie_browser_import_timeout",
+                (
+                    f"Reading {browser} Cookies exceeded {timeout_seconds} seconds. Confirm the service runs as the same "
+                    "logged-in macOS user and approve any keychain prompt; otherwise upload a Netscape cookies.txt file."
+                ),
+                {
+                    "platform": platform,
+                    "browser": browser,
+                    "profile": profile,
+                    "service_user": service_user(),
+                    "service_home": str(service_home()),
+                    "timeout_seconds": timeout_seconds,
+                    "error": f"browser Cookie import timed out after {timeout_seconds} seconds",
+                },
+            ) from exc
+        except OSError as exc:
+            raise CookieManagerError(
+                "cookie_browser_import_failed",
+                "The service could not start the isolated browser Cookie reader.",
+                {
+                    "browser": browser,
+                    "profile": profile,
+                    "service_user": service_user(),
+                    "service_home": str(service_home()),
+                    "error": sanitize_error_text(exc),
+                },
+            ) from exc
+        if completed.returncode != 0:
+            raise _worker_error(completed, browser, profile)
+        try:
+            worker_payload = json.loads(completed.stdout or "{}")
+        except ValueError:
+            worker_payload = {}
+        worker_result = worker_payload.get("result") if isinstance(worker_payload, dict) else {}
+        if not isinstance(worker_result, dict):
+            worker_result = {}
+        selected_profile = worker_result.get("profile", profile)
+        profiles_checked = worker_result.get("profiles_checked") or ([profile] if profile else [])
+        if not output_path.exists():
+            raise CookieManagerError(
+                "cookie_browser_import_failed",
+                "The browser Cookie reader exited without producing a Cookie file.",
+                {
+                    "browser": browser,
+                    "profile": profile,
+                    "service_user": service_user(),
+                    "service_home": str(service_home()),
+                },
+            )
+        rows = _platform_rows(_rows_from_path(output_path), platform)
         if not rows:
             raise CookieManagerError(
                 "cookie_browser_platform_missing",
-                "The browser profile contains no Cookies for this platform. Open the login page, sign in, then retry.",
-                {"platform": platform, "browser": browser, "profile": profile},
+                "The selected browser Profile contains no Cookies for this platform.",
+                {
+                    "platform": platform,
+                    "browser": browser,
+                    "profile": profile,
+                    "service_user": service_user(),
+                    "service_home": str(service_home()),
+                },
             )
         with _lock:
             _atomic_write_cookie_file(managed_cookie_path(platform), rows)
-        result = cookie_status(platform)
-        result.update({"imported": True, "browser": browser, "profile": profile, "imported_cookie_count": len(rows)})
-        return result
-    except CookieManagerError:
-        raise
-    except Exception as exc:
-        captured = [message for message in logger.messages[-5:] if message]
-        raise CookieManagerError(
-            "cookie_browser_import_failed",
-            (
-                "The service could not read this browser profile. On macOS, launchd may be unable to unlock Chrome Cookies; "
-                "export a Netscape cookies.txt file from the logged-in browser and upload it instead."
-            ),
-            {
-                "browser": browser,
-                "profile": profile,
-                "error": sanitize_error_text(exc),
-                "browser_messages": captured,
-            },
-        ) from exc
+    result = cookie_status(platform)
+    result.update(
+        {
+            "imported": True,
+            "browser": browser,
+            "profile": selected_profile,
+            "profiles_checked": profiles_checked,
+            "service_user": service_user(),
+            "imported_cookie_count": len(rows),
+        }
+    )
+    return result
 
 
 def delete_managed_cookie(platform: str) -> dict:

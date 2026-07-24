@@ -84,6 +84,7 @@ class Settings:
     ytdlp_socket_timeout_seconds: int
     ytdlp_redirect_timeout_seconds: int
     ytdlp_extract_attempts: int
+    ytdlp_browser_cookie_timeout_seconds: int
     max_analyze_workers: int
     max_produce_workers: int
 
@@ -115,6 +116,10 @@ class Settings:
         self.ytdlp_socket_timeout_seconds = min(120, max(5, _int_env("XHS_YTDLP_SOCKET_TIMEOUT_SECONDS", 30)))
         self.ytdlp_redirect_timeout_seconds = min(60, max(3, _int_env("XHS_YTDLP_REDIRECT_TIMEOUT_SECONDS", 12)))
         self.ytdlp_extract_attempts = min(4, max(1, _int_env("XHS_YTDLP_EXTRACT_ATTEMPTS", 2)))
+        self.ytdlp_browser_cookie_timeout_seconds = min(
+            180,
+            max(10, _int_env("XHS_YTDLP_BROWSER_COOKIE_TIMEOUT_SECONDS", 45)),
+        )
         self.max_analyze_workers = max(1, _int_env("YTXHS_MAX_ANALYZE_WORKERS", 1))
         self.max_produce_workers = max(1, _int_env("YTXHS_MAX_PRODUCE_WORKERS", 3))
 

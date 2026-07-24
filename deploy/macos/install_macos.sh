@@ -101,6 +101,11 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   exit 1
 fi
 SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+SERVICE_HOME="$(/usr/bin/dscl . -read "/Users/${SERVICE_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+if [ -z "$SERVICE_HOME" ] || [ ! -d "$SERVICE_HOME" ]; then
+  echo "Could not determine home directory for service user: $SERVICE_USER" >&2
+  exit 1
+fi
 
 case "$LAUNCHD_MODE" in
   daemon|agent|none) ;;
@@ -334,6 +339,7 @@ echo "Installing ytube-xhs"
 echo "  source:       $SOURCE_DIR"
 echo "  app dir:      $APP_DIR"
 echo "  service user: $SERVICE_USER:$SERVICE_GROUP"
+echo "  service home: $SERVICE_HOME"
 echo "  bind:         $HOST:$PORT"
 echo "  launchd:      $LAUNCHD_MODE"
 
@@ -426,21 +432,21 @@ if [ "$LAUNCHD_MODE" != "none" ]; then
     BOOTSTRAP_DOMAIN="system"
   else
     USER_BLOCK=""
-    USER_HOME="$(dscl . -read "/Users/${SERVICE_USER}" NFSHomeDirectory | awk '{print $2}')"
-    PLIST_DEST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
+    PLIST_DEST="${SERVICE_HOME}/Library/LaunchAgents/${LABEL}.plist"
     BOOTSTRAP_DOMAIN="gui/$(id -u "$SERVICE_USER")"
     mkdir -p "$(dirname "$PLIST_DEST")"
   fi
 
-  python3 - "$TEMPLATE" "$PLIST_TMP" "$APP_DIR" "$HOST" "$PORT" "$USER_BLOCK" <<'PY'
+  python3 - "$TEMPLATE" "$PLIST_TMP" "$APP_DIR" "$HOST" "$PORT" "$USER_BLOCK" "$SERVICE_HOME" <<'PY'
 import sys
 
-template_path, output_path, app_dir, host, port, user_block = sys.argv[1:7]
+template_path, output_path, app_dir, host, port, user_block, service_home = sys.argv[1:8]
 text = open(template_path, "r", encoding="utf-8").read()
 text = text.replace("__APP_DIR__", app_dir)
 text = text.replace("__HOST__", host)
 text = text.replace("__PORT__", port)
 text = text.replace("__USER_BLOCK__", user_block)
+text = text.replace("__SERVICE_HOME__", service_home)
 open(output_path, "w", encoding="utf-8").write(text)
 PY
 

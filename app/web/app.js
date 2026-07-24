@@ -2486,7 +2486,15 @@ function cookieVerificationBlock(verification) {
   `;
 }
 
-function renderCookiePlatform(platform, browsers) {
+function cookieProfileOptions(browser, browserProfiles) {
+  const profiles = browserProfiles?.[browser] || [];
+  return [
+    '<option value="">自动检测全部 Profile</option>',
+    ...profiles.map((profile) => `<option value="${escapeHtml(profile)}">${escapeHtml(profile)}</option>`),
+  ].join("");
+}
+
+function renderCookiePlatform(platform, browsers, browserProfiles) {
   const browserOptions = (browsers || ["chrome"]).map((browser) => `
     <option value="${escapeHtml(browser)}" ${browser === "chrome" ? "selected" : ""}>${escapeHtml(browser)}</option>
   `).join("");
@@ -2516,10 +2524,12 @@ function renderCookiePlatform(platform, browsers) {
         <div class="cookie-control-band">
           <div class="field-row">
             <label class="field">浏览器
-              <select id="cookie-browser-${escapeHtml(platform.platform)}">${browserOptions}</select>
+              <select id="cookie-browser-${escapeHtml(platform.platform)}" data-cookie-browser-platform="${escapeHtml(platform.platform)}">${browserOptions}</select>
             </label>
             <label class="field">Profile
-              <input id="cookie-profile-${escapeHtml(platform.platform)}" placeholder="留空使用默认 Profile" />
+              <select id="cookie-profile-${escapeHtml(platform.platform)}">
+                ${cookieProfileOptions("chrome", browserProfiles)}
+              </select>
             </label>
           </div>
           <button class="button" data-action="import-browser-cookie" data-platform="${escapeHtml(platform.platform)}" type="button">从本机浏览器导入并检测</button>
@@ -2563,11 +2573,20 @@ async function renderCookieAccounts() {
       <div class="grid">
         <section class="panel pad cookie-security-bar">
           <div><b>Cookie 值不通过网页回显，文件权限固定为 0600。</b><p>在服务所在 Mac 登录后可直接导入；远程浏览此页面时，请在已登录设备导出 Netscape cookies.txt 后上传。</p></div>
-          <code>${escapeHtml(state.cookieStatuses.auth_dir || "runtime/auth")}</code>
+          <div class="cookie-runtime-details">
+            <span>浏览器读取用户 <b>${escapeHtml(state.cookieStatuses.browser_import?.service_user || "未知")}</b></span>
+            <span>最长等待 <b>${escapeHtml(state.cookieStatuses.browser_import?.timeout_seconds || 45)} 秒</b></span>
+            <code>${escapeHtml(state.cookieStatuses.browser_import?.service_home || "用户目录未知")}</code>
+            <code>${escapeHtml(state.cookieStatuses.auth_dir || "runtime/auth")}</code>
+          </div>
         </section>
         <div id="cookie-action-message"></div>
         <div class="cookie-platform-grid">
-          ${(state.cookieStatuses.platforms || []).map((platform) => renderCookiePlatform(platform, state.cookieStatuses.supported_browsers)).join("")}
+          ${(state.cookieStatuses.platforms || []).map((platform) => renderCookiePlatform(
+            platform,
+            state.cookieStatuses.supported_browsers,
+            state.cookieStatuses.browser_profiles,
+          )).join("")}
         </div>
       </div>
     `,
@@ -2577,17 +2596,37 @@ async function renderCookieAccounts() {
 function cookieActionError(error) {
   const detail = error?.body?.detail || {};
   const details = detail.details || {};
+  const localizedMessages = {
+    cookie_browser_platform_missing: "已检查可读的浏览器 Profile，但没有找到该平台 Cookie。请选择实际登录账号所在的 Profile 后重试。",
+    cookie_browser_import_timeout: "读取浏览器 Cookie 超时。请核对服务用户、解锁 macOS 登录钥匙串，或改为上传 Netscape cookies.txt。",
+    cookie_browser_import_failed: "无法读取浏览器 Cookie。请核对服务用户和 Profile；launchd 无法解锁钥匙串时请改为上传 cookies.txt。",
+  };
+  const failureDetails = Array.isArray(details.browser_failures)
+    ? details.browser_failures.map((item) => `${item.profile || "Profile"}: ${item.error || "读取失败"}`).join("\n")
+    : "";
+  const context = [
+    details.service_user ? `服务用户: ${details.service_user}` : "",
+    details.service_home ? `用户目录: ${details.service_home}` : "",
+    details.browser ? `浏览器: ${details.browser}` : "",
+    details.profile ? `Profile: ${details.profile}` : "",
+    Array.isArray(details.profiles_checked) ? `已检查: ${details.profiles_checked.join(", ")}` : "",
+  ].filter(Boolean).join(" · ");
   return {
-    message: detail.message || errorText(error),
-    actual: details.error || (Array.isArray(details.browser_messages) ? details.browser_messages.join("\n") : ""),
+    message: localizedMessages[detail.code] || detail.message || errorText(error),
+    actual: [
+      details.error || (Array.isArray(details.browser_messages) ? details.browser_messages.join("\n") : ""),
+      failureDetails,
+      context,
+    ].filter(Boolean).join("\n"),
   };
 }
 
 function setCookieActionMessage(kind, title, detail = "") {
   const target = document.querySelector("#cookie-action-message");
   if (!target) return;
+  const resultClass = kind === "error" ? "result-error" : (kind === "pending" ? "result-pending" : "result-ok");
   target.innerHTML = `
-    <section class="panel pad cookie-action-result ${kind === "error" ? "result-error" : "result-ok"}">
+    <section class="panel pad cookie-action-result ${resultClass}" aria-live="polite">
       <b>${escapeHtml(title)}</b>
       ${detail ? `<pre>${escapeHtml(detail)}</pre>` : ""}
     </section>
@@ -2598,7 +2637,16 @@ function setCookieActionMessage(kind, title, detail = "") {
 async function importBrowserCookie(platform, button) {
   const browser = document.querySelector(`#cookie-browser-${platform}`)?.value || "chrome";
   const profile = document.querySelector(`#cookie-profile-${platform}`)?.value?.trim() || null;
+  const originalLabel = button.textContent;
+  const importRuntime = state.cookieStatuses?.browser_import || {};
   button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  button.textContent = "正在读取浏览器 Cookie...";
+  setCookieActionMessage(
+    "pending",
+    `正在从 ${browser} 读取 ${platform} Cookie`,
+    `服务用户: ${importRuntime.service_user || "未知"} · 用户目录: ${importRuntime.service_home || "未知"} · Profile: ${profile || "自动检测全部"} · 最长等待 ${importRuntime.timeout_seconds || 45} 秒`,
+  );
   try {
     const result = await apiCookiePost("/api/auth/cookies/import-browser", { platform, browser, profile });
     await renderCookieAccounts();
@@ -2607,7 +2655,11 @@ async function importBrowserCookie(platform, button) {
     const failure = cookieActionError(error);
     setCookieActionMessage("error", failure.message, failure.actual);
   } finally {
-    button.disabled = false;
+    if (button.isConnected) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = originalLabel;
+    }
   }
 }
 
@@ -3512,6 +3564,13 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.dataset.cookieBrowserPlatform) {
+    const platform = event.target.dataset.cookieBrowserPlatform;
+    const profileSelect = document.querySelector(`#cookie-profile-${platform}`);
+    if (profileSelect) {
+      profileSelect.innerHTML = cookieProfileOptions(event.target.value, state.cookieStatuses?.browser_profiles);
+    }
+  }
   if (event.target.id === "transcript-search") {
     state.transcriptQuery = event.target.value;
     const content = document.querySelector("#detail-tab-content");

@@ -33,6 +33,16 @@ def test_macos_bootcheck_plist_template_contains_launchd_keys():
     assert "bootcheck.out.log" in template
 
 
+def test_macos_service_plist_uses_service_account_home():
+    template = (ROOT / "deploy/macos/com.ytube-xhs.service.plist.template").read_text(encoding="utf-8")
+    installer = (ROOT / "deploy/macos/install_macos.sh").read_text(encoding="utf-8")
+
+    assert "<key>HOME</key>" in template
+    assert "<string>__SERVICE_HOME__</string>" in template
+    assert 'SERVICE_HOME="$(/usr/bin/dscl' in installer
+    assert 'text.replace("__SERVICE_HOME__", service_home)' in installer
+
+
 def test_macos_installer_refreshes_ytdlp_and_secures_platform_auth_dir():
     script = (ROOT / "deploy/macos/install_macos.sh").read_text(encoding="utf-8")
 

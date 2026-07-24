@@ -149,8 +149,8 @@ XHS_IMAGE_REQUIRE_API_KEY=auto
 平台 Cookie：浏览器打开 `http://<Mac-mini-IP>:8012/settings/accounts`，分别管理 YouTube、抖音、哔哩哔哩和今日头条。每个平台可执行：
 
 1. 打开官方登录页并在有权访问内容的账号中登录。
-2. 如果页面就在服务所在 Mac 打开，点击“从本机浏览器导入并检测”。
-3. 如果通过另一台电脑远程打开页面，或 launchd 无法解锁 Chrome 钥匙串，从已登录浏览器导出 Netscape `cookies.txt` 后上传。
+2. 如果页面就在服务所在 Mac 打开，确认页面显示的“浏览器读取用户”和“用户目录”与登录浏览器的 macOS 用户一致。launchd 会显式设置该用户的 `HOME`，系统自动扫描全部可读 Chrome Profile，并用绝对目录读取；也可在下拉菜单指定 `Default`、`Profile 1` 等 Profile，Chrome 当前值可从 `chrome://version` 的“个人资料路径”末段确认。
+3. 浏览器导入会立即显示进行中状态，并在 `XHS_YTDLP_BROWSER_COOKIE_TIMEOUT_SECONDS`（默认 45 秒）后明确超时。如果通过另一台电脑远程打开页面，或 launchd 无法解锁 Chrome 钥匙串，从已登录浏览器导出 Netscape `cookies.txt` 后上传。
 4. 粘贴实际失败的视频链接，点击“验证 Cookie”，确认专用 extractor、标题和验证时间。
 
 项目不接收或保存账号密码。Cookie 值不会通过 API、页面或日志回显；只显示平台域、数量、过期摘要和验证错误。平台文件保存到：
@@ -170,6 +170,7 @@ XHS_YTDLP_COOKIES_FROM_BROWSER=
 XHS_YTDLP_SOCKET_TIMEOUT_SECONDS=30
 XHS_YTDLP_REDIRECT_TIMEOUT_SECONDS=12
 XHS_YTDLP_EXTRACT_ATTEMPTS=2
+XHS_YTDLP_BROWSER_COOKIE_TIMEOUT_SECONDS=45
 ```
 
 `Fresh cookies (not necessarily logged in) are needed` 表示平台需要新的匿名或登录态浏览器 Cookie，不代表公开视频已失效。平台文件存在时任务只使用该来源平台文件，不会再读取整个 Chrome Cookie 库。
